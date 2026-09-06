@@ -20,14 +20,15 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-hybrid-joint-control-10"
+APP_BUILD = "2026-09-06-clean-connect-11"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
+CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
 UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
-RESET_WAYPOINT_MAX_DELTA = 0.02
+RESET_WAYPOINT_MAX_DELTA = 0.20
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
     (-1.74533, 1.74533),
@@ -109,6 +110,7 @@ class NeroLab(tk.Tk):
         self.robot: Nero | None = None
         self.safe_bicep_position_reached = False
         self.slider_motion_job: str | None = None
+        self.gripper_motion_job: str | None = None
         self.pending_slider_joint: int | None = None
         self.pending_slider_value: float | None = None
         self.suppress_slider_motion = False
@@ -309,7 +311,16 @@ class NeroLab(tk.Tk):
         if self.robot is not None and self.robot.is_connected:
             self.log_message("Arm is already connected")
             return
-        self.robot = Nero(NeroConfig(id="nero_lab", can_channel="can0", bitrate=1_000_000, firmware_version="v121", speed_percent=100, has_gripper=True, has_camera=False))
+        self.robot = Nero(NeroConfig(
+            id="nero_lab",
+            can_channel="can0",
+            bitrate=1_000_000,
+            firmware_version="v121",
+            speed_percent=100,
+            has_gripper=True,
+            has_camera=False,
+            reset_on_connect=False,
+        ))
         self.robot.connect(calibrate=False)
         self.robot._arm.enable()
         self.robot._arm.set_speed_percent(100)
@@ -466,6 +477,31 @@ class NeroLab(tk.Tk):
         block_reason = self.joint_motion_block_reason(robot)
         if block_reason is not None:
             raise RuntimeError(f"{label} cannot start because {block_reason}")
+        status = robot.get_arm_status()
+        message = getattr(status, "msg", status)
+        arm_status = str(getattr(message, "arm_status", ""))
+        if "NO_SOLUTION" in arm_status or "SINGULARITY" in arm_status:
+            self.log_message(f"DEBUG {label} running clean-connect P-to-J recovery")
+            self.set_motion_mode_and_wait(
+                robot, robot._arm.OPTIONS.MOTION_MODE.P, "MOVE_P", f"{label} P recovery"
+            )
+            start = [float(value) for value in robot.get_joint_angles()]
+            move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
+            self.log_message(
+                f"COMMAND {label} move_p={move_result!r} target={CONTROL_PRIME_POSE}"
+            )
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                current = [float(value) for value in robot.get_joint_angles()]
+                if any(abs(value - initial) > 0.02 for value, initial in zip(current, start)):
+                    self.log_arm_debug(f"{label} P recovery moved arm")
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError(
+                    f"{label} clean-connect P recovery produced no encoder movement: "
+                    f"{self.arm_debug_text(robot)}"
+                )
         self.set_motion_mode_and_wait(
             robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", f"{label} joint control"
         )
@@ -484,20 +520,10 @@ class NeroLab(tk.Tk):
                 value + (goal - value) * fraction
                 for value, goal in zip(start, target)
             ]
-            status = robot.get_arm_status()
-            message = getattr(status, "msg", status)
-            arm_status = str(getattr(message, "arm_status", ""))
-            use_direct_stream = "NO_SOLUTION" in arm_status or "SINGULARITY" in arm_status
-            motion_api = "move_js" if use_direct_stream else "move_j"
-            motion_command = getattr(robot._arm, motion_api, None)
-            if motion_command is None:
-                raise RuntimeError(
-                    f"Installed pyAgxArm does not provide {motion_api} required for {label}"
-                )
-            move_result = motion_command(waypoint)
+            move_result = robot._arm.move_j(waypoint)
             self.log_message(
                 f"COMMAND {label} waypoint {waypoint_index}/{waypoint_count} "
-                f"api={motion_api} result={move_result!r} "
+                f"move_j={move_result!r} "
                 f"target={[round(value, 6) for value in waypoint]}"
             )
             self.wait_for_joint_target(
@@ -589,6 +615,9 @@ class NeroLab(tk.Tk):
         if self.slider_motion_job is not None:
             self.after_cancel(self.slider_motion_job)
             self.slider_motion_job = None
+        if self.gripper_motion_job is not None:
+            self.after_cancel(self.gripper_motion_job)
+            self.gripper_motion_job = None
         self.pending_slider_joint = None
         self.pending_slider_value = None
 
@@ -601,6 +630,12 @@ class NeroLab(tk.Tk):
             self.suppress_slider_motion = False
 
     def slider_gripper(self) -> None:
+        if self.gripper_motion_job is not None:
+            self.after_cancel(self.gripper_motion_job)
+        self.gripper_motion_job = self.after(SLIDER_DEBOUNCE_MS, self._send_gripper_motion)
+
+    def _send_gripper_motion(self) -> None:
+        self.gripper_motion_job = None
         robot = self.require_robot()
         if robot is not None:
             width = self.gripper_var.get()
