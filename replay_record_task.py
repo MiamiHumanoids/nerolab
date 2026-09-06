@@ -14,7 +14,7 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
-from task_trajectory import prepare_replay_samples, smooth_move_to_target
+from task_trajectory import prepare_replay_samples, safe_bicep_shutdown, smooth_move_to_target
 
 REPLAY_SPEED_PERCENT = 25
 
@@ -129,16 +129,7 @@ def main(task_file: Path, dataset_root: Path) -> None:
         print("Replay complete; saving episode.")
     finally:
         cv2.destroyAllWindows()
-        try:
-            robot._arm.set_follower_mode()
-            robot._arm.reset()
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline and not robot._arm.enable():
-                time.sleep(0.1)
-            robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-        except Exception:
-            pass
-        robot.disconnect()
+        safe_bicep_shutdown(robot, "Replay recording shutdown")
 
     dataset.save_episode()
     print(f"Saved replay dataset: {dataset_root}")

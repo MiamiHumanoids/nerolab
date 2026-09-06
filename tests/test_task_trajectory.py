@@ -1,12 +1,14 @@
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from task_trajectory import (
     SAFE_BICEP_JOINTS,
     command_recorded_gripper,
     interpolated_joint_trajectory,
     prepare_replay_samples,
+    safe_bicep_shutdown,
 )
 
 
@@ -118,6 +120,37 @@ class TaskTrajectoryTest(unittest.TestCase):
         self.assertEqual(effector.calls, [
             ("angle", 17.5, 1.0),
             ("width", 0.04, 1.0),
+        ])
+
+    def test_safe_shutdown_moves_brakes_then_disconnects(self):
+        events = []
+
+        class Arm:
+            def set_speed_percent(self, speed):
+                events.append(("speed", speed))
+
+        class Robot:
+            _arm = Arm()
+
+            def engage_brakes(self):
+                events.append(("brakes",))
+
+            def disconnect(self, disable_arm=True):
+                events.append(("disconnect", disable_arm))
+
+        with patch(
+            "task_trajectory.smooth_move_to_target",
+            side_effect=lambda robot, target, label: events.append(
+                ("move", target.copy(), label)
+            ),
+        ):
+            safe_bicep_shutdown(Robot(), "Replay shutdown")
+
+        self.assertEqual(events, [
+            ("speed", 25),
+            ("move", SAFE_BICEP_JOINTS, "Replay shutdown"),
+            ("brakes",),
+            ("disconnect", False),
         ])
 
 

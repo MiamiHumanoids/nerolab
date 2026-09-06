@@ -12,6 +12,7 @@ from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
     command_recorded_gripper,
     prepare_replay_samples,
+    safe_bicep_shutdown,
     smooth_move_to_target,
     stream_recorded_trajectory,
 )
@@ -89,16 +90,7 @@ def main(task_file: Path) -> None:
             f"target={final_target} current={final_joints}."
         )
     finally:
-        try:
-            robot._arm.set_follower_mode()
-            robot._arm.reset()
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline and not robot._arm.enable():
-                time.sleep(0.1)
-            robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-        except Exception:
-            pass
-        robot.disconnect()
+        safe_bicep_shutdown(robot, "Replay shutdown")
     print("Task replay complete; no dataset was recorded.")
 
 

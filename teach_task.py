@@ -13,7 +13,7 @@ import numpy as np
 
 from lerobot_robot_nero import Nero, NeroConfig
 from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
-from task_trajectory import SAFE_BICEP_JOINTS, convert_leader_samples, smooth_move_to_target
+from task_trajectory import convert_leader_samples, safe_bicep_shutdown
 
 FPS = 15
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
@@ -68,19 +68,6 @@ def wait_for_fresh_gripper_feedback(
         "No fresh physical gripper feedback after entering Teach mode; "
         "CAN 0x2A8 did not resume."
     )
-
-
-def return_to_safe_bicep_and_disconnect(robot: Nero) -> None:
-    try:
-        robot._arm.set_speed_percent(25)
-        smooth_move_to_target(robot, SAFE_BICEP_JOINTS, "Teach shutdown")
-        print("Teach shutdown: Safe Bicep reached.", flush=True)
-    finally:
-        try:
-            robot.engage_brakes()
-            print("Teach shutdown: emergency-stop resting pose settled.", flush=True)
-        finally:
-            robot.disconnect(disable_arm=False)
 
 
 def main(task: str, output: Path, follower_anchor: list[float]) -> None:
@@ -171,7 +158,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
             cv2.destroyAllWindows()
 
     if len(sequence) < 2:
-        return_to_safe_bicep_and_disconnect(robot)
+        safe_bicep_shutdown(robot, "Teach shutdown")
         raise RuntimeError("Teach task was too short; record at least two samples.")
     start_time = float(sequence[0]["time"])
     for sample in sequence:
@@ -199,7 +186,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         output.write_text(json.dumps(recording, indent=2))
         print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
         print(f"Replay unavailable: {exc}", flush=True)
-        return_to_safe_bicep_and_disconnect(robot)
+        safe_bicep_shutdown(robot, "Teach shutdown")
         return
     output.write_text(json.dumps({
         "task": task,
@@ -210,7 +197,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         "samples": sequence,
     }, indent=2))
     print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
-    return_to_safe_bicep_and_disconnect(robot)
+    safe_bicep_shutdown(robot, "Teach shutdown")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-smooth-brake-settle-33`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-large-window-35`.
 
 ## Core Principles
 
@@ -275,6 +275,7 @@ Important replay rules:
 - During the brief GUI-to-task subprocess handoff, release the GUI connection without changing motor state. Ordinary disconnect sends emergency stop and lets the arm descend smoothly from Safe Bicep to its mechanical resting pose. Nero v121 continues to report every joint as enabled during `EMERGENCY_STOP`, so enable bits are not used as brake confirmation and no subsequent `disable()` command is sent.
 - After emergency stop latches, disconnect monitors encoder motion until every joint changes by no more than 0.001 rad for 0.75 seconds, then closes CAN. If the resting pose does not settle within 8 seconds, disconnect aborts and leaves CAN connected.
 - After Teach saves its samples, it returns to Safe Bicep under follower control, verifies the target, performs the same smooth emergency-stop settle, and only then closes the CAN connection. The Safe Bicep return and settling motion are not appended to the taught trajectory.
+- Standalone Replay and Replay-and-Record use the same shutdown helper: return to Safe Bicep at 25 percent, verify arrival, allow the emergency-stop descent to settle, then close CAN. They do not reset/re-enable the controller between the recorded trajectory and shutdown.
 - Use a clean connection with `reset_on_connect=False`.
 - Do not immediately call `set_teach_mode(False)` on a fresh replay connection; that redundantly invokes follower/reset behavior.
 - Select J mode explicitly before replay.

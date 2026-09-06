@@ -145,6 +145,17 @@ def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:
     )
 
 
+def safe_bicep_shutdown(robot: Any, label: str) -> None:
+    try:
+        robot._arm.set_speed_percent(25)
+        smooth_move_to_target(robot, SAFE_BICEP_JOINTS, label)
+        print(f"{label}: Safe Bicep reached.", flush=True)
+    finally:
+        robot.engage_brakes()
+        print(f"{label}: emergency-stop resting pose settled.", flush=True)
+        robot.disconnect(disable_arm=False)
+
+
 def _validate_targets(samples: list[dict[str, Any]]) -> None:
     for index, sample in enumerate(samples, 1):
         target = [float(value) for value in sample["joints"]]

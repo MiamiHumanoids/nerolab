@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import prepare_replay_samples
 
-APP_BUILD = "2026-09-06-smooth-brake-settle-33"
+APP_BUILD = "2026-09-06-large-window-35"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -107,7 +107,15 @@ class NeroLab(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("NERO Lab")
-        self.geometry("1600x1000")
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        window_width = int(screen_width * 0.95)
+        window_height = int(screen_height * 0.95)
+        window_x = (screen_width - window_width) // 2
+        window_y = (screen_height - window_height) // 2
+        self.geometry(
+            f"{window_width}x{window_height}+{window_x}+{window_y}"
+        )
         self.minsize(1300, 850)
         self.process: subprocess.Popen[str] | None = None
         self.robot: Nero | None = None
