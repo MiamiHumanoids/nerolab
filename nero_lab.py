@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-auto-nudge-19"
+APP_BUILD = "2026-09-06-teach-anchor-20"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -1051,12 +1051,27 @@ class NeroLab(tk.Tk):
         if not task:
             messagebox.showwarning("Task required", "Enter a task instruction first.")
             return
+        follower_anchor = SAFE_BICEP_RESET_JOINTS.copy()
+        if self.robot is not None and self.robot.is_connected:
+            try:
+                follower_anchor = [float(value) for value in self.robot.get_joint_angles()]
+            except Exception:
+                pass
         if not self._prepare_task_process(emergency_brake=False):
             return
         TASK_BASE.mkdir(parents=True, exist_ok=True)
         output = TASK_BASE / f"{self._task_slug(task)}.json"
         self.taught_task_file = output
-        self.start_process([sys.executable, str(TASK_TEACHER), "--task", task, "--output", str(output)], "Teach task")
+        self.start_process([
+            sys.executable,
+            str(TASK_TEACHER),
+            "--task",
+            task,
+            "--output",
+            str(output),
+            "--follower-anchor",
+            *[str(value) for value in follower_anchor],
+        ], "Teach task")
 
     def replay_trained_task(self) -> None:
         task = self.task_var.get().strip()

@@ -49,16 +49,22 @@ def prepare_replay_samples(recording: dict[str, Any]) -> list[dict[str, Any]]:
     samples = list(recording.get("samples", []))
     if len(samples) < 2:
         raise ValueError("Taught task contains fewer than two samples.")
-    if recording.get("joint_space") == "follower":
+    joint_space = recording.get("joint_space")
+    if joint_space == "follower":
         _validate_targets(samples)
         return samples
 
     targets = [[float(value) for value in sample["joints"]] for sample in samples]
-    if all(joints_within_limits(target) for target in targets):
+    if joint_space is None and all(joints_within_limits(target) for target in targets):
         return samples
 
-    print("Legacy leader-space task detected; anchoring its first sample to Safe Bicep.")
-    return convert_leader_samples(samples, SAFE_BICEP_JOINTS)
+    follower_anchor = [
+        float(value) for value in recording.get("follower_anchor", SAFE_BICEP_JOINTS)
+    ]
+    if len(follower_anchor) != 7:
+        raise ValueError("Taught task follower anchor must contain seven joints.")
+    print("Leader-space task detected; converting it with its follower anchor.")
+    return convert_leader_samples(samples, follower_anchor)
 
 
 def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:

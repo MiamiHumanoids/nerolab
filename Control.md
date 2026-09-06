@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-auto-nudge-19`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-teach-anchor-20`.
 
 ## Core Principles
 
@@ -262,7 +262,7 @@ The gripper slider is also debounced. Without debouncing, a drag emitted one com
 
 ## Replay and Recorded Motion
 
-Teach mode reports leader-space encoder coordinates, which are not directly legal follower-mode commands. New recordings preserve those raw values as `leader_joints` and also store replayable `joints` by anchoring the first leader sample to the follower encoder pose captured immediately before teach mode. This preserves every taught delta without commanding leader calibration offsets as follower angles.
+Teach mode reports leader-space encoder coordinates, which are not directly legal follower-mode commands. New recordings preserve those raw values as `leader_joints` and also store replayable `joints` by anchoring the first leader sample to the verified follower encoder pose captured by NERO Lab before it disconnects and launches the teach process. The anchor must be passed across that process boundary because a fresh teach-process connection can expose leader-like coordinates even before teach mode is enabled. This preserves every taught delta without commanding leader calibration offsets as follower angles.
 
 Legacy recordings without `joint_space: follower` are checked before replay. If their values exceed follower command limits, the first sample is anchored to Safe Bicep and the same relative offsets are applied to the complete trajectory.
 

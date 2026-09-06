@@ -36,6 +36,24 @@ class TaskTrajectoryTest(unittest.TestCase):
         self.assertIs(prepared[0], samples[0])
         self.assertNotIn("leader_joints", prepared[0])
 
+    def test_leader_recording_uses_its_saved_follower_anchor(self):
+        anchor = SAFE_BICEP_JOINTS.copy()
+        anchor[0] = 0.1
+        leader_start = [0.0] * 7
+        samples = [
+            {"time": 0.0, "joints": leader_start, "gripper": 0.1},
+            {"time": 0.1, "joints": [0.05] + [0.0] * 6, "gripper": 0.1},
+        ]
+
+        prepared = prepare_replay_samples({
+            "joint_space": "leader",
+            "follower_anchor": anchor,
+            "samples": samples,
+        })
+
+        self.assertEqual(prepared[0]["joints"], anchor)
+        self.assertAlmostEqual(prepared[1]["joints"][0], 0.15)
+
 
 if __name__ == "__main__":
     unittest.main()

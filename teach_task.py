@@ -30,7 +30,7 @@ def read_gripper_width(effector, fallback: float = 0.1) -> float:
     return fallback
 
 
-def main(task: str, output: Path) -> None:
+def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     robot = Nero(NeroConfig(
         id="nero_teach",
         can_channel="can0",
@@ -64,7 +64,6 @@ def main(task: str, output: Path) -> None:
     print("Press q in the teach window to save the task.")
 
     try:
-        follower_anchor = [float(value) for value in robot.get_joint_angles()]
         robot.set_teach_mode(True)
         robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=1))
         while True:
@@ -102,8 +101,15 @@ def main(task: str, output: Path) -> None:
     start_time = float(sequence[0]["time"])
     for sample in sequence:
         sample["time"] = float(sample["time"]) - start_time
-    sequence = convert_leader_samples(sequence, follower_anchor)
     output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps({
+        "task": task,
+        "fps": FPS,
+        "joint_space": "leader",
+        "follower_anchor": follower_anchor,
+        "samples": sequence,
+    }, indent=2))
+    sequence = convert_leader_samples(sequence, follower_anchor)
     output.write_text(json.dumps({
         "task": task,
         "fps": FPS,
@@ -171,5 +177,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Record a manually taught NERO trajectory.")
     parser.add_argument("--task", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--follower-anchor", type=float, nargs=7, required=True)
     args = parser.parse_args()
-    main(args.task, args.output)
+    main(args.task, args.output, args.follower_anchor)
