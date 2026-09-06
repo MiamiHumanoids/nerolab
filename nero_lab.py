@@ -20,14 +20,14 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-control-debug-8"
+APP_BUILD = "2026-09-06-joint-control-9"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
-CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
 UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
+RESET_WAYPOINT_MAX_DELTA = 0.20
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
     (-1.74533, 1.74533),
@@ -442,55 +442,18 @@ class NeroLab(tk.Tk):
             time.sleep(0.02)
         raise RuntimeError(f"{label} did not enter {expected}: {self.arm_debug_text(robot)}")
 
-    def prime_position_control(self, robot: Nero, label: str, timeout: float = 5.0) -> None:
-        mode_result = self.set_motion_mode_and_wait(
-            robot, robot._arm.OPTIONS.MOTION_MODE.P, "MOVE_P", f"{label} prime"
-        )
-        initial_joints = [float(value) for value in robot.get_joint_angles()]
-        move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
-        self.log_message(
-            f"COMMAND {label} prime mode_p={mode_result!r} move_p={move_result!r} "
-            f"target={CONTROL_PRIME_POSE}"
-        )
-        deadline = time.monotonic() + timeout
-        retry_at = time.monotonic() + 0.75
-        attempts = 1
-        while time.monotonic() < deadline:
-            status = robot.get_arm_status()
-            message = getattr(status, "msg", status)
-            arm_status = str(getattr(message, "arm_status", ""))
-            mode_feedback = str(getattr(message, "mode_feedback", ""))
-            enabled = robot._arm.get_joints_enable_status_list()
-            if "NORMAL" in arm_status and "MOVE_P" in mode_feedback and all(enabled):
-                self.log_arm_debug(f"{label} P prime reached normal control")
-                break
-            if attempts < 3 and time.monotonic() >= retry_at:
-                current = [float(value) for value in robot.get_joint_angles()]
-                moved = any(abs(value - start) > 0.005 for value, start in zip(current, initial_joints))
-                if not moved:
-                    attempts += 1
-                    retry_result = robot._arm.move_p(CONTROL_PRIME_POSE)
-                    self.log_message(
-                        f"COMMAND {label} P prime retry {attempts}/3 returned {retry_result!r}; "
-                        "no encoder movement detected"
-                    )
-                retry_at = time.monotonic() + 0.75
-            time.sleep(0.05)
-        else:
-            raise RuntimeError(f"{label} P prime did not clear controller fault: {self.arm_debug_text(robot)}")
-        self.set_motion_mode_and_wait(
-            robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", f"{label} switch to J"
-        )
-
-    def controller_has_fault(self, robot: Nero) -> bool:
+    def joint_motion_block_reason(self, robot: Nero) -> str | None:
         status = robot.get_arm_status()
         message = getattr(status, "msg", status)
         arm_status = str(getattr(message, "arm_status", ""))
-        return (
-            "SINGULARITY" in arm_status
-            or "NO_SOLUTION" in arm_status
-            or "BRAKE_NOT_RELEASED" in arm_status
-        )
+        if "EMERGENCY_STOP" in arm_status:
+            return "emergency stop is active; click Re-enable Arm"
+        if "BRAKE_NOT_RELEASED" in arm_status:
+            return "motor brake is not released; click Re-enable Arm"
+        enabled = robot._arm.get_joints_enable_status_list()
+        if not all(enabled):
+            return f"one or more joints are disabled: {enabled}"
+        return None
 
     def joints_outside_command_limits(self, robot: Nero) -> bool:
         current = robot.get_joint_angles()
@@ -500,25 +463,38 @@ class NeroLab(tk.Tk):
         )
 
     def prepare_reset_motion(self, robot: Nero, label: str) -> None:
-        status = robot.get_arm_status()
-        message = getattr(status, "msg", status)
-        arm_status = str(getattr(message, "arm_status", ""))
-        has_kinematic_fault = "SINGULARITY" in arm_status or "NO_SOLUTION" in arm_status
-        has_brake_fault = "BRAKE_NOT_RELEASED" in arm_status
-        outside_limits = self.joints_outside_command_limits(robot)
-        if has_brake_fault:
-            self.log_message(f"DEBUG {label} detected brake fault; running follower/reset/enable recovery")
-            robot.set_teach_mode(False)
-            self.log_arm_debug(f"{label} after controller recovery")
-        if has_kinematic_fault or has_brake_fault or outside_limits:
-            reason = "kinematic fault" if has_kinematic_fault else (
-                "brake fault" if has_brake_fault else "current joints outside command limits"
+        block_reason = self.joint_motion_block_reason(robot)
+        if block_reason is not None:
+            raise RuntimeError(f"{label} cannot start because {block_reason}")
+        self.set_motion_mode_and_wait(
+            robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", f"{label} joint control"
+        )
+
+    def move_joint_path(self, robot: Nero, target: list[float], label: str) -> None:
+        start = [float(value) for value in robot.get_joint_angles()]
+        largest_delta = max(abs(goal - value) for value, goal in zip(start, target))
+        waypoint_count = max(1, int(largest_delta / RESET_WAYPOINT_MAX_DELTA) + 1)
+        self.log_message(
+            f"COMMAND {label} J-space path has {waypoint_count} waypoint(s); "
+            f"start={start} target={target}"
+        )
+        for waypoint_index in range(1, waypoint_count + 1):
+            fraction = waypoint_index / waypoint_count
+            waypoint = [
+                value + (goal - value) * fraction
+                for value, goal in zip(start, target)
+            ]
+            move_result = robot._arm.move_j(waypoint)
+            self.log_message(
+                f"COMMAND {label} waypoint {waypoint_index}/{waypoint_count} "
+                f"move_j={move_result!r} target={[round(value, 6) for value in waypoint]}"
             )
-            self.log_message(f"DEBUG {label} priming P control because {reason}")
-            self.prime_position_control(robot, label)
-        else:
-            self.set_motion_mode_and_wait(
-                robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", f"{label} controller already normal"
+            self.wait_for_joint_target(
+                robot,
+                waypoint,
+                f"{label} waypoint {waypoint_index}/{waypoint_count}",
+                tolerance=0.01,
+                timeout=5.0,
             )
 
     def emergency_brake(self) -> None:
@@ -576,12 +552,11 @@ class NeroLab(tk.Tk):
             self.pending_slider_value = None
             self.safe_bicep_position_reached = False
             self.log_arm_debug(f"slider joint={joint} requested={desired}")
-            if self.controller_has_fault(robot) or self.joints_outside_command_limits(robot):
+            block_reason = self.joint_motion_block_reason(robot)
+            if block_reason is not None or self.joints_outside_command_limits(robot):
                 self.set_joint_slider_values(robot.get_joint_angles())
-                self.log_message(
-                    "COMMAND slider blocked: controller fault or current joints outside command limits; "
-                    "use Upright Reset or Safe Bicep Reset first"
-                )
+                reason = block_reason or "current joints are outside command limits"
+                self.log_message(f"COMMAND slider blocked: {reason}")
                 return
             targets = [float(value) for value in robot.get_joint_angles()]
             targets[joint - 1] = desired
@@ -669,11 +644,8 @@ class NeroLab(tk.Tk):
             self.log_arm_debug(f"Upright Reset before recovery target={UPRIGHT_RESET_JOINTS}")
             self.prepare_reset_motion(robot, "Upright Reset")
             speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            move_result = robot._arm.move_j(UPRIGHT_RESET_JOINTS)
-            self.log_message(
-                f"COMMAND Upright Reset speed={speed_result!r} move_j={move_result!r} "
-                f"target={UPRIGHT_RESET_JOINTS}"
-            )
+            self.log_message(f"COMMAND Upright Reset speed={speed_result!r}")
+            self.move_joint_path(robot, UPRIGHT_RESET_JOINTS, "Upright Reset")
             self.wait_for_joint_target(robot, UPRIGHT_RESET_JOINTS, "upright joint reset")
             self.log_arm_debug("Upright Reset target reached")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
@@ -689,13 +661,20 @@ class NeroLab(tk.Tk):
         self.gripper_var.set(0.1)
         self.log_message(f"Upright Reset reached: joints {UPRIGHT_RESET_JOINTS}; gripper 0.1 m")
 
-    def wait_for_joint_target(self, robot: Nero, target: list[float], label: str, timeout: float = 8.0) -> None:
+    def wait_for_joint_target(
+        self,
+        robot: Nero,
+        target: list[float],
+        label: str,
+        timeout: float = 8.0,
+        tolerance: float = 0.002,
+    ) -> None:
         start = time.monotonic()
         deadline = time.monotonic() + timeout
         early_snapshot_logged = False
         while time.monotonic() < deadline:
             current = robot.get_joint_angles()
-            if all(abs(float(value) - goal) <= 0.002 for value, goal in zip(current, target)):
+            if all(abs(float(value) - goal) <= tolerance for value, goal in zip(current, target)):
                 return
             if not early_snapshot_logged and time.monotonic() - start >= 0.25:
                 self.log_arm_debug(f"{label} 250ms after move_j")
@@ -715,11 +694,8 @@ class NeroLab(tk.Tk):
             self.log_arm_debug(f"Safe Bicep before recovery target={SAFE_BICEP_RESET_JOINTS}")
             self.prepare_reset_motion(robot, "Safe Bicep")
             speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            move_result = robot._arm.move_j(SAFE_BICEP_RESET_JOINTS)
-            self.log_message(
-                f"COMMAND Safe Bicep speed={speed_result!r} move_j={move_result!r} "
-                f"target={SAFE_BICEP_RESET_JOINTS}"
-            )
+            self.log_message(f"COMMAND Safe Bicep speed={speed_result!r}")
+            self.move_joint_path(robot, SAFE_BICEP_RESET_JOINTS, "Safe Bicep")
             self.wait_for_joint_target(robot, SAFE_BICEP_RESET_JOINTS, "Safe Bicep Reset")
             self.log_arm_debug("Safe Bicep target reached")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
