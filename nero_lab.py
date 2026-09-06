@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-clean-connect-11"
+APP_BUILD = "2026-09-06-smooth-reset-12"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -28,7 +28,6 @@ UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
-RESET_WAYPOINT_MAX_DELTA = 0.20
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
     (-1.74533, 1.74533),
@@ -485,22 +484,38 @@ class NeroLab(tk.Tk):
             self.set_motion_mode_and_wait(
                 robot, robot._arm.OPTIONS.MOTION_MODE.P, "MOVE_P", f"{label} P recovery"
             )
-            start = [float(value) for value in robot.get_joint_angles()]
-            move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
-            self.log_message(
-                f"COMMAND {label} move_p={move_result!r} target={CONTROL_PRIME_POSE}"
-            )
-            deadline = time.monotonic() + 8.0
-            while time.monotonic() < deadline:
-                current = [float(value) for value in robot.get_joint_angles()]
-                if any(abs(value - initial) > 0.02 for value, initial in zip(current, start)):
-                    self.log_arm_debug(f"{label} P recovery moved arm")
-                    break
-                time.sleep(0.05)
+            for attempt in range(1, 4):
+                start = [float(value) for value in robot.get_joint_angles()]
+                move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
+                self.log_message(
+                    f"COMMAND {label} P recovery {attempt}/3 move_p={move_result!r} "
+                    f"target={CONTROL_PRIME_POSE}"
+                )
+                moved = False
+                deadline = time.monotonic() + 8.0
+                while time.monotonic() < deadline:
+                    current = [float(value) for value in robot.get_joint_angles()]
+                    moved = moved or any(
+                        abs(value - initial) > 0.002 for value, initial in zip(current, start)
+                    )
+                    status = robot.get_arm_status()
+                    message = getattr(status, "msg", status)
+                    arm_status = str(getattr(message, "arm_status", ""))
+                    motion_status = str(getattr(message, "motion_status", ""))
+                    if moved and "NORMAL" in arm_status and "SUCCESSFULLY" in motion_status:
+                        self.log_arm_debug(f"{label} P recovery completed")
+                        break
+                    time.sleep(0.05)
+                else:
+                    progress = "partial encoder movement" if moved else "no encoder movement"
+                    self.log_message(
+                        f"DEBUG {label} P recovery {attempt}/3 ended with {progress}; retrying"
+                    )
+                    continue
+                break
             else:
                 raise RuntimeError(
-                    f"{label} clean-connect P recovery produced no encoder movement: "
-                    f"{self.arm_debug_text(robot)}"
+                    f"{label} clean-connect P recovery did not complete: {self.arm_debug_text(robot)}"
                 )
         self.set_motion_mode_and_wait(
             robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", f"{label} joint control"
@@ -508,31 +523,12 @@ class NeroLab(tk.Tk):
 
     def move_joint_path(self, robot: Nero, target: list[float], label: str) -> None:
         start = [float(value) for value in robot.get_joint_angles()]
-        largest_delta = max(abs(goal - value) for value, goal in zip(start, target))
-        waypoint_count = max(1, int(largest_delta / RESET_WAYPOINT_MAX_DELTA) + 1)
+        move_result = robot._arm.move_j(target)
         self.log_message(
-            f"COMMAND {label} J-space path has {waypoint_count} waypoint(s); "
+            f"COMMAND {label} continuous move_j={move_result!r} "
             f"start={start} target={target}"
         )
-        for waypoint_index in range(1, waypoint_count + 1):
-            fraction = waypoint_index / waypoint_count
-            waypoint = [
-                value + (goal - value) * fraction
-                for value, goal in zip(start, target)
-            ]
-            move_result = robot._arm.move_j(waypoint)
-            self.log_message(
-                f"COMMAND {label} waypoint {waypoint_index}/{waypoint_count} "
-                f"move_j={move_result!r} "
-                f"target={[round(value, 6) for value in waypoint]}"
-            )
-            self.wait_for_joint_target(
-                robot,
-                waypoint,
-                f"{label} waypoint {waypoint_index}/{waypoint_count}",
-                tolerance=0.01,
-                timeout=5.0,
-            )
+        self.wait_for_joint_target(robot, target, label)
 
     def emergency_brake(self) -> None:
         robot = self.require_robot()
@@ -688,11 +684,10 @@ class NeroLab(tk.Tk):
         self.safe_bicep_position_reached = False
         try:
             self.log_arm_debug(f"Upright Reset before recovery target={UPRIGHT_RESET_JOINTS}")
-            self.prepare_reset_motion(robot, "Upright Reset")
             speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             self.log_message(f"COMMAND Upright Reset speed={speed_result!r}")
+            self.prepare_reset_motion(robot, "Upright Reset")
             self.move_joint_path(robot, UPRIGHT_RESET_JOINTS, "Upright Reset")
-            self.wait_for_joint_target(robot, UPRIGHT_RESET_JOINTS, "upright joint reset")
             self.log_arm_debug("Upright Reset target reached")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
             robot._arm.set_speed_percent(100)
@@ -738,11 +733,10 @@ class NeroLab(tk.Tk):
         self.cancel_slider_motion()
         try:
             self.log_arm_debug(f"Safe Bicep before recovery target={SAFE_BICEP_RESET_JOINTS}")
-            self.prepare_reset_motion(robot, "Safe Bicep")
             speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             self.log_message(f"COMMAND Safe Bicep speed={speed_result!r}")
+            self.prepare_reset_motion(robot, "Safe Bicep")
             self.move_joint_path(robot, SAFE_BICEP_RESET_JOINTS, "Safe Bicep")
-            self.wait_for_joint_target(robot, SAFE_BICEP_RESET_JOINTS, "Safe Bicep Reset")
             self.log_arm_debug("Safe Bicep target reached")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
             robot._arm.set_speed_percent(100)
