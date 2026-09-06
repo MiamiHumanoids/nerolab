@@ -23,9 +23,10 @@ STREAM_INTERVAL_S = 0.01
 STREAM_SPEED_RAD_S = 0.4
 GRIPPER_OPEN_WIDTH_M = 0.1
 GRIPPER_REPLAY_FORCE = 3.0
+GRIPPER_GRASP_FORCE = 3.0
 GRIPPER_CLOSE_THRESHOLD_M = 0.085
 GRIPPER_OPEN_THRESHOLD_M = 0.0994
-GRIPPER_OPEN_REFERENCE_TOLERANCE_M = 0.0001
+GRIPPER_OPEN_REFERENCE_TOLERANCE_M = 0.001
 GRIPPER_OPEN_CONFIRMATION_S = 0.45
 GRIPPER_RELEASE_TOLERANCE_RAD = 0.01
 GRIPPER_RELEASE_WRIST_TOLERANCE_RAD = 0.005
@@ -132,6 +133,7 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
     amplified: list[dict[str, Any]] = []
     closed = False
     opening_started: float | None = None
+    opening_start_index: int | None = None
     for sample in samples:
         processed = dict(sample)
         mode = str(sample.get("gripper_mode", "width"))
@@ -144,27 +146,34 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
                 if value >= open_threshold:
                     if opening_started is None:
                         opening_started = sample_time
+                        opening_start_index = len(amplified)
                     elif sample_time - opening_started >= GRIPPER_OPEN_CONFIRMATION_S:
                         closed = False
+                        if opening_start_index is not None:
+                            for pending in amplified[opening_start_index:]:
+                                pending["gripper_grasping"] = False
+                                pending["gripper_force"] = GRIPPER_REPLAY_FORCE
                         opening_started = None
+                        opening_start_index = None
                 else:
                     opening_started = None
-            processed["gripper"] = 0.0 if closed else GRIPPER_OPEN_WIDTH_M
+                    opening_start_index = None
+            processed["gripper_grasping"] = closed
+            processed["gripper_force"] = (
+                GRIPPER_GRASP_FORCE if closed else GRIPPER_REPLAY_FORCE
+            )
         amplified.append(processed)
     if amplified and str(samples[-1].get("gripper_mode", "width")) == "width":
         if float(samples[-1].get("gripper", GRIPPER_OPEN_WIDTH_M)) >= open_threshold:
-            amplified[-1]["gripper"] = GRIPPER_OPEN_WIDTH_M
+            amplified[-1]["gripper_grasping"] = False
+            amplified[-1]["gripper_force"] = GRIPPER_REPLAY_FORCE
     return amplified
 
 
 def is_amplified_gripper_opening(
-    sample: dict[str, Any], previous: tuple[str, float] | None
+    sample: dict[str, Any], previous_grasping: bool
 ) -> bool:
-    return (
-        previous == ("width", 0.0)
-        and str(sample.get("gripper_mode", "width")) == "width"
-        and float(sample.get("gripper", 0.0)) == GRIPPER_OPEN_WIDTH_M
-    )
+    return previous_grasping and not bool(sample.get("gripper_grasping", False))
 
 
 def wait_for_gripper_release_pose(robot: Any, target: list[float], label: str) -> float:
@@ -213,15 +222,17 @@ def prepare_gripper_for_replay(effector: Any) -> None:
 def command_recorded_gripper(
     effector: Any,
     sample: dict[str, Any],
-    previous: tuple[str, float] | None,
-) -> tuple[str, float]:
+    previous: tuple[str, float, float] | None,
+) -> tuple[str, float, float]:
     mode = str(sample.get("gripper_mode", "width"))
     value = float(sample.get("gripper", GRIPPER_OPEN_WIDTH_M))
+    force = float(sample.get("gripper_force", GRIPPER_REPLAY_FORCE))
     threshold = 0.5 if mode == "angle" else 0.0005
     if (
         previous is not None
         and mode == previous[0]
         and abs(value - previous[1]) <= threshold
+        and abs(force - previous[2]) <= 0.001
     ):
         return previous
     if mode == "angle":
@@ -230,12 +241,12 @@ def command_recorded_gripper(
             raise RuntimeError("Recorded angle-mode gripper motion requires move_gripper_deg")
     else:
         move = effector.move_gripper_m
-    move(value=value, force=GRIPPER_REPLAY_FORCE)
+    move(value=value, force=force)
     print(
         f"Gripper replay sample: mode={mode} value={value:.6f} "
-        f"force={GRIPPER_REPLAY_FORCE:.1f}"
+        f"force={force:.1f}"
     )
-    return mode, value
+    return mode, value, force
 
 
 def convert_leader_samples(

@@ -76,7 +76,8 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
         f"Recorded gripper: modes={gripper_modes} min={min(gripper_values):.6f} "
         f"max={max(gripper_values):.6f}."
     )
-    previous_gripper: tuple[str, float] | None = None
+    previous_gripper: tuple[str, float, float] | None = None
+    previous_grasping = False
     try:
         smooth_move_with_recovery(
             robot,
@@ -86,15 +87,16 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
         robot._arm.set_speed_percent(TRAJECTORY_SPEED_PERCENT)
         print(f"Recorded trajectory speed set to {TRAJECTORY_SPEED_PERCENT}%.")
         def apply_sample(sample: dict[str, object], index: int) -> float:
-            nonlocal previous_gripper
+            nonlocal previous_gripper, previous_grasping
             timeline_pause = 0.0
-            if amplified_gripper and is_amplified_gripper_opening(sample, previous_gripper):
+            if amplified_gripper and is_amplified_gripper_opening(sample, previous_grasping):
                 timeline_pause = wait_for_gripper_release_pose(
                     robot,
                     [float(value) for value in sample["joints"]],
                     "Task replay",
                 )
             previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
+            previous_grasping = bool(sample.get("gripper_grasping", False))
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")
             return timeline_pause

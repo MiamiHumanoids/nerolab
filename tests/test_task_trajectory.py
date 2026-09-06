@@ -216,11 +216,15 @@ class TaskTrajectoryTest(unittest.TestCase):
                 self.calls.append((value, force))
 
         effector = Effector()
-        sample = {"gripper_mode": "width", "gripper": 0.0}
+        sample = {
+            "gripper_mode": "width",
+            "gripper": 0.02,
+            "gripper_force": 3.0,
+        }
         previous = command_recorded_gripper(effector, sample, None)
         command_recorded_gripper(effector, sample, previous)
 
-        self.assertEqual(effector.calls, [(0.0, 3.0)])
+        self.assertEqual(effector.calls, [(0.02, 3.0)])
 
     def test_gripper_replay_resets_control_before_configuring_range(self):
         events = []
@@ -240,7 +244,7 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("configure", {"max_range_config": 0.1, "timeout": 5.0}),
         ])
 
-    def test_amplified_gripper_is_binary_with_delayed_opening(self):
+    def test_amplified_gripper_backdates_confirmed_opening(self):
         samples = [
             {"time": 0.0, "gripper_mode": "width", "gripper": 0.1},
             {"time": 0.1, "gripper_mode": "width", "gripper": 0.08},
@@ -254,7 +258,15 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         self.assertEqual(
             [sample["gripper"] for sample in amplified],
-            [0.1, 0.0, 0.0, 0.0, 0.0, 0.1],
+            [0.1, 0.08, 0.0993, 0.0995, 0.0995, 0.0995],
+        )
+        self.assertEqual(
+            [sample["gripper_grasping"] for sample in amplified],
+            [False, True, False, False, False, False],
+        )
+        self.assertEqual(
+            [sample["gripper_force"] for sample in amplified],
+            [3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
         )
         self.assertEqual(
             [sample["gripper"] for sample in samples],
@@ -269,7 +281,10 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         amplified = amplify_gripper_samples(samples)
 
-        self.assertEqual([sample["gripper"] for sample in amplified], [0.0, 0.1])
+        self.assertEqual([sample["gripper"] for sample in amplified], [0.04, 0.1])
+        self.assertEqual(
+            [sample["gripper_force"] for sample in amplified], [3.0, 3.0]
+        )
 
     def test_amplified_gripper_recognizes_calibrated_open_plateau(self):
         samples = [
@@ -281,9 +296,32 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         amplified = amplify_gripper_samples(samples)
 
-        self.assertEqual(amplified[10]["gripper"], 0.0)
-        self.assertEqual(amplified[24]["gripper"], 0.0)
-        self.assertEqual(amplified[25]["gripper"], 0.1)
+        self.assertEqual(
+            [sample["gripper"] for sample in amplified],
+            [sample["gripper"] for sample in samples],
+        )
+        self.assertTrue(amplified[10]["gripper_grasping"])
+        self.assertFalse(amplified[20]["gripper_grasping"])
+        self.assertEqual(amplified[10]["gripper_force"], 3.0)
+        self.assertEqual(amplified[20]["gripper_force"], 3.0)
+
+    def test_amplified_gripper_preserves_lower_small_object_release_plateau(self):
+        values = [0.0993] * 10 + [0.02] * 10 + [0.0988] * 6 + [0.0993] * 10
+        samples = [
+            {"time": index * 0.1, "gripper_mode": "width", "gripper": value}
+            for index, value in enumerate(values)
+        ]
+
+        amplified = amplify_gripper_samples(samples)
+
+        self.assertEqual(
+            [sample["gripper"] for sample in amplified],
+            [sample["gripper"] for sample in samples],
+        )
+        self.assertTrue(amplified[19]["gripper_grasping"])
+        self.assertFalse(amplified[20]["gripper_grasping"])
+        self.assertEqual(amplified[19]["gripper_force"], 3.0)
+        self.assertEqual(amplified[20]["gripper_force"], 3.0)
 
     def test_amplified_opening_waits_for_recorded_release_pose(self):
         target = [0.0, -1.7594, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -312,7 +350,7 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         self.assertEqual(robot._arm.targets, [target])
         self.assertTrue(is_amplified_gripper_opening(
-            {"gripper_mode": "width", "gripper": 0.1}, ("width", 0.0)
+            {"gripper_grasping": False}, True
         ))
 
     def test_safe_shutdown_moves_brakes_then_disconnects(self):

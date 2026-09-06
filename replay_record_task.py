@@ -15,8 +15,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
-    GRIPPER_REPLAY_FORCE,
     amplify_gripper_samples,
+    command_recorded_gripper,
     is_amplified_gripper_opening,
     prepare_gripper_for_replay,
     prepare_replay_samples,
@@ -101,7 +101,8 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
 
     stop_requested = False
     try:
-        previous_gripper: tuple[str, float] | None = None
+        previous_gripper: tuple[str, float, float] | None = None
+        previous_grasping = False
         smooth_move_with_recovery(
             robot,
             [float(value) for value in samples[0]["joints"]],
@@ -113,20 +114,12 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
             mode = str(sample.get("gripper_mode", "width"))
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
             robot._arm.move_js(target)
-            if amplified_gripper and is_amplified_gripper_opening(sample, previous_gripper):
+            if amplified_gripper and is_amplified_gripper_opening(sample, previous_grasping):
                 pause_started = time.monotonic()
                 wait_for_gripper_release_pose(robot, target, "Replay recording")
                 replay_started += time.monotonic() - pause_started
-            if (
-                previous_gripper is None
-                or abs(gripper - previous_gripper[1]) > 0.002
-            ):
-                effector.move_gripper_m(value=gripper, force=GRIPPER_REPLAY_FORCE)
-                print(
-                    f"Gripper replay recording command: value={gripper:.6f} "
-                    f"force={GRIPPER_REPLAY_FORCE:.1f}"
-                )
-                previous_gripper = (mode, gripper)
+            previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
+            previous_grasping = bool(sample.get("gripper_grasping", False))
             obs = robot.get_observation()
             state = np.asarray(obs["observation.state"], dtype=np.float32)
             wrist = rgb_image(obs.get("observation.images.wrist"), "wrist")
