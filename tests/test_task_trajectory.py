@@ -207,7 +207,7 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("width", 0.04, 30.0),
         ])
 
-    def test_gripper_replay_can_refresh_closed_holding_force(self):
+    def test_gripper_replay_latches_single_closed_command(self):
         class Effector:
             def __init__(self):
                 self.calls = []
@@ -218,9 +218,9 @@ class TaskTrajectoryTest(unittest.TestCase):
         effector = Effector()
         sample = {"gripper_mode": "width", "gripper": 0.0}
         previous = command_recorded_gripper(effector, sample, None)
-        command_recorded_gripper(effector, sample, previous, repeat=True)
+        command_recorded_gripper(effector, sample, previous)
 
-        self.assertEqual(effector.calls, [(0.0, 30.0), (0.0, 30.0)])
+        self.assertEqual(effector.calls, [(0.0, 30.0)])
 
     def test_gripper_replay_resets_control_before_configuring_range(self):
         events = []

@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-sustained-grip-53`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-latched-grip-55`.
 
 ## Core Principles
 
@@ -293,7 +293,7 @@ Important replay rules:
 - The GUI enables `Amplify gripper during replay` by default for both replay flows. In amplified width mode the gripper is binary: a taught width at or below 0.085 m commands fully closed at 0.0 m. Reopening requires the taught width to remain near fully open for 0.45 seconds. The threshold is the stricter of the recording's calibrated 99th-percentile open reference minus 0.1 mm and the nominal 0.0994 m limit, so recordings whose sensor plateaus slightly below 0.1 m still release only at their demonstrated fully-open state. Angle-mode recordings retain their taught values because their open range is not reliably encoded; all modes use force 30.0.
 - Before an amplified opening command, replay repeatedly holds the matching recorded arm pose until joints 1-4 are within 0.01 rad and wrist joints 5-7 are within 0.005 rad. It then opens and extends the remaining replay timeline by the settling delay. If the pose is not reached within five seconds, replay aborts without opening the gripper. This applies to both normal Replay and Replay-and-Record.
 - Every replay process resets stale gripper control state with `disable_gripper()` before configuring the 0.1 m pendant range. This matches the proven standalone gripper sequence and makes saved tasks replay their gripper after reconnecting in a later application session. Both replay modes log configuration and gripper command values.
-- While amplified replay is in the closed state, it refreshes the 0.0 m command at force 30.0 every 0.25 seconds so the motor actively maintains its grasp for the full taught hold interval. Opening is still emitted only at the confirmed taught release event. Release-pose feedback is compared with the nearest reachable command-limit pose, preventing an out-of-envelope taught joint such as joint 2 at -1.759 rad from making the release gate impossible, while the original taught arm targets remain unchanged.
+- Amplified replay sends one 0.0 m close command at force 30.0 and leaves that controller target latched until the confirmed taught release event; it does not repeatedly command a gripper that is already holding the object. Release-pose feedback is compared with the nearest reachable command-limit pose, preventing an out-of-envelope taught joint such as joint 2 at -1.759 rad from making the release gate impossible, while the original taught arm targets remain unchanged.
 - Build 37 accidentally reused the joint-sample variable while reading gripper channels, producing `joints: ["width", value]`. Those files retain gripper motion but contain no arm trajectory and must be re-recorded with build 38; replay validation reports this explicitly.
 - Require exactly seven finite values in every recorded target.
 - Do not reject or clamp a taught target against the reset and GUI application envelope. If teach mode can record the pose, replay sends that converted pose exactly.

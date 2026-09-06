@@ -10,7 +10,6 @@ from pathlib import Path
 
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
-    GRIPPER_HOLD_REFRESH_S,
     amplify_gripper_samples,
     command_recorded_gripper,
     is_amplified_gripper_opening,
@@ -78,7 +77,6 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
         f"max={max(gripper_values):.6f}."
     )
     previous_gripper: tuple[str, float] | None = None
-    last_closed_command_time: float | None = None
     try:
         smooth_move_with_recovery(
             robot,
@@ -88,7 +86,7 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
         robot._arm.set_speed_percent(TRAJECTORY_SPEED_PERCENT)
         print(f"Recorded trajectory speed set to {TRAJECTORY_SPEED_PERCENT}%.")
         def apply_sample(sample: dict[str, object], index: int) -> float:
-            nonlocal previous_gripper, last_closed_command_time
+            nonlocal previous_gripper
             timeline_pause = 0.0
             if amplified_gripper and is_amplified_gripper_opening(sample, previous_gripper):
                 timeline_pause = wait_for_gripper_release_pose(
@@ -96,25 +94,7 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
                     [float(value) for value in sample["joints"]],
                     "Task replay",
                 )
-            sample_time = float(sample["time"])
-            closed = (
-                amplified_gripper
-                and str(sample.get("gripper_mode", "width")) == "width"
-                and float(sample.get("gripper", 0.1)) == 0.0
-            )
-            repeat_closed = (
-                closed
-                and last_closed_command_time is not None
-                and sample_time - last_closed_command_time >= GRIPPER_HOLD_REFRESH_S
-            )
-            previous_state = previous_gripper
-            previous_gripper = command_recorded_gripper(
-                effector, sample, previous_gripper, repeat=repeat_closed
-            )
-            if closed and (previous_state != previous_gripper or repeat_closed):
-                last_closed_command_time = sample_time
-            elif not closed:
-                last_closed_command_time = None
+            previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")
             return timeline_pause
