@@ -552,6 +552,11 @@ class NeroLab(tk.Tk):
         self.log.configure(state="disabled")
         self.status_var.set(message.splitlines()[-1][:140])
 
+    def clear_activity_log(self) -> None:
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+
     def refresh_datasets(self) -> None:
         DATASET_BASE.mkdir(parents=True, exist_ok=True)
         dataset_paths = list(DATASET_BASE.glob("nero_manual__*")) + list(DATASET_BASE.glob("nero_replayed__*"))
@@ -738,6 +743,7 @@ class NeroLab(tk.Tk):
         if not task_file.exists():
             messagebox.showwarning("No taught task", "Click Teach Task and save a motion before replaying it.")
             return
+        self.clear_activity_log()
         if not self._prepare_task_process(emergency_brake=False):
             return
         dataset_root = DATASET_BASE / f"nero_replayed__{self._task_slug(task)}"
@@ -752,6 +758,7 @@ class NeroLab(tk.Tk):
         if not task_file.exists():
             messagebox.showwarning("No taught task", "Select or teach a task before replaying it.")
             return
+        self.clear_activity_log()
         if self.process and self.process.poll() is None and self.taught_task_file == task_file:
             task_file.with_suffix(".replay").touch()
             self.log_message("Replay requested for the active taught-task session")

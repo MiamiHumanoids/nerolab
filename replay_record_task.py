@@ -16,16 +16,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot_robot_nero import Nero, NeroConfig
 
 REPLAY_SPEED_PERCENT = 25
-WAYPOINT_STRIDE = 5
-JOINT_LIMITS = [
-    (-2.695261, 2.695261),
-    (-1.73533, 1.73533),
-    (-2.747621, 2.747621),
-    (-1.002291, 2.136755),
-    (-2.747621, 2.747621),
-    (-0.723039, 0.949932),
-    (-1.560797, 1.560797),
-]
+JOINT_TOLERANCE = 0.01
+MOTION_TIMEOUT = 5.0
 
 REPO_ID = "adrian/nero_replayed"
 FEATURES = {
@@ -48,6 +40,19 @@ def rgb_image(value: object, label: str) -> np.ndarray:
     if image.dtype != np.uint8:
         image = np.clip(image * 255.0 if image.max() <= 1.0 else image, 0, 255).astype(np.uint8)
     return cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if image.shape[-1] == 3 else image
+
+
+def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
+    time.sleep(0.05)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = robot.get_joint_angles()
+        if all(abs(float(value) - goal) <= JOINT_TOLERANCE for value, goal in zip(current, target)):
+            return
+        time.sleep(0.02)
+    raise RuntimeError(
+        f"Replay did not reach recorded target {target}; current joints={robot.get_joint_angles()}"
+    )
 
 
 def main(task_file: Path, dataset_root: Path) -> None:
@@ -99,35 +104,22 @@ def main(task_file: Path, dataset_root: Path) -> None:
     cv2.namedWindow("NERO replay recording", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO replay recording", 1280, 480)
     print(f"Replaying taught task and recording dataset: {dataset_root}")
-    print(f"Sending recorded joint targets every {WAYPOINT_STRIDE} samples.")
+    print("Sending every recorded joint target and waiting for joint feedback.")
 
     stop_requested = False
     try:
         start = time.monotonic()
         previous_gripper = None
-        previous_target = None
         for index, sample in enumerate(samples):
-            raw_target = [float(value) for value in sample["joints"]]
-            target = [
-                max(lower, min(upper, value))
-                for value, (lower, upper) in zip(raw_target, JOINT_LIMITS)
-            ]
-            if target != raw_target:
-                print(f"Clamped waypoint {index + 1}: {raw_target} -> {target}")
+            target = [float(value) for value in sample["joints"]]
+            if len(target) != 7:
+                raise ValueError(f"Recorded sample {index + 1} has {len(target)} joints; expected 7")
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
                 effector.move_gripper_m(value=gripper, force=30.0)
                 previous_gripper = gripper
-            send_waypoint = (
-                index % WAYPOINT_STRIDE == 0
-                or index == len(samples) - 1
-            )
-            if send_waypoint and (
-                previous_target is None
-                or any(abs(value - previous) > 0.001 for value, previous in zip(target, previous_target))
-            ):
-                robot._arm.move_j(target)
-                previous_target = target
+            robot._arm.move_j(target)
+            wait_for_target(robot, target)
             duration = float(sample["time"]) - (float(samples[index - 1]["time"]) if index else 0.0)
             deadline = time.monotonic() + max(1.0 / 15.0, duration)
             while time.monotonic() < deadline:

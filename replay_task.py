@@ -13,16 +13,8 @@ import numpy as np
 
 from lerobot_robot_nero import Nero, NeroConfig
 REPLAY_SPEED_PERCENT = 25
-WAYPOINT_STRIDE = 5
-JOINT_LIMITS = [
-    (-2.695261, 2.695261),
-    (-1.73533, 1.73533),
-    (-2.747621, 2.747621),
-    (-1.002291, 2.136755),
-    (-2.747621, 2.747621),
-    (-0.723039, 0.949932),
-    (-1.560797, 1.560797),
-]
+JOINT_TOLERANCE = 0.01
+MOTION_TIMEOUT = 5.0
 
 
 def to_bgr(value: object, label: str) -> np.ndarray:
@@ -49,17 +41,18 @@ def arm_status_text(robot: Nero) -> str:
     )
 
 
-def wait_for_motion(robot: Nero, timeout: float = 2.0) -> None:
-    time.sleep(0.03)
+def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
+    time.sleep(0.05)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status = robot.get_arm_status()
-        message = getattr(status, "msg", status)
-        motion_status = getattr(message, "motion_status", 0)
-        if int(motion_status) == 0:
+        if joints_are_close(robot, target, tolerance=JOINT_TOLERANCE):
             return
         time.sleep(0.02)
-    raise RuntimeError(f"Replay motion did not reach target: {arm_status_text(robot)}")
+    current = robot.get_joint_angles()
+    raise RuntimeError(
+        f"Replay did not reach recorded target {target}; current joints={current}; "
+        f"{arm_status_text(robot)}"
+    )
 
 
 def joints_are_close(robot: Nero, target: list[float], tolerance: float = 0.01) -> bool:
@@ -120,33 +113,20 @@ def main(task_file: Path) -> None:
     cv2.namedWindow("NERO task replay", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO task replay", 1280, 480)
     print(f"Replaying task without recording: {task_file}")
-    print(f"Sending recorded joint targets every {WAYPOINT_STRIDE} samples.")
+    print("Sending every recorded joint target and waiting for joint feedback.")
     stop_requested = False
     previous_gripper = None
-    previous_target: list[float] | None = None
     try:
         for index, sample in enumerate(samples):
-            raw_target = [float(value) for value in sample["joints"]]
-            target = [
-                max(lower, min(upper, value))
-                for value, (lower, upper) in zip(raw_target, JOINT_LIMITS)
-            ]
-            if target != raw_target:
-                print(f"Clamped waypoint {index + 1}: {raw_target} -> {target}")
+            target = [float(value) for value in sample["joints"]]
+            if len(target) != 7:
+                raise ValueError(f"Recorded sample {index + 1} has {len(target)} joints; expected 7")
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
                 effector.move_gripper_m(value=gripper, force=30.0)
                 previous_gripper = gripper
-            send_waypoint = (
-                index % WAYPOINT_STRIDE == 0
-                or index == len(samples) - 1
-            )
-            if send_waypoint and (
-                previous_target is None
-                or any(abs(value - previous) > 0.001 for value, previous in zip(target, previous_target))
-            ):
-                robot._arm.move_j(target)
-                previous_target = target
+            robot._arm.move_j(target)
+            wait_for_target(robot, target)
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")
             previous_time = float(samples[index - 1]["time"]) if index else 0.0
@@ -164,8 +144,6 @@ def main(task_file: Path) -> None:
                 time.sleep(0.005)
             if stop_requested:
                 break
-    except RuntimeError as exc:
-        print(f"Replay stopped safely: {exc}")
     finally:
         cv2.destroyAllWindows()
         try:

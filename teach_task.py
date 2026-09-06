@@ -15,7 +15,8 @@ from lerobot_robot_nero import Nero, NeroConfig
 from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
 
 FPS = 15
-WAYPOINT_STRIDE = 5
+JOINT_TOLERANCE = 0.01
+MOTION_TIMEOUT = 5.0
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
 JOINT_LIMITS = [
     (-2.695261, 2.695261),
@@ -37,6 +38,19 @@ def read_gripper_width(effector, fallback: float = 0.1) -> float:
     except Exception:
         pass
     return fallback
+
+
+def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
+    time.sleep(0.05)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = robot.get_joint_angles()
+        if all(abs(float(value) - goal) <= JOINT_TOLERANCE for value, goal in zip(current, target)):
+            return
+        time.sleep(0.02)
+    raise RuntimeError(
+        f"Replay did not reach recorded target {target}; current joints={robot.get_joint_angles()}"
+    )
 
 
 def main(task: str, output: Path) -> None:
@@ -125,29 +139,22 @@ def main(task: str, output: Path) -> None:
     while not replay_trigger.exists():
         time.sleep(0.1)
     replay_trigger.unlink(missing_ok=True)
-    print(f"Replaying recorded joint targets every {WAYPOINT_STRIDE} samples.")
+    print("Sending every recorded joint target and waiting for joint feedback.")
     robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
     robot._arm.set_speed_percent(25)
     cv2.namedWindow("NERO task replay", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO task replay", 1280, 480)
-    previous_target: list[float] | None = None
     previous_gripper = None
     for index, sample in enumerate(sequence):
         target = [float(value) for value in sample["joints"]]
+        if len(target) != 7:
+            raise ValueError(f"Recorded sample {index + 1} has {len(target)} joints; expected 7")
         gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
         if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
             effector.move_gripper_m(value=gripper, force=30.0)
             previous_gripper = gripper
-        send_waypoint = (
-            index % WAYPOINT_STRIDE == 0
-            or index == len(sequence) - 1
-        )
-        if send_waypoint and (
-            previous_target is None
-            or any(abs(value - previous) > 0.001 for value, previous in zip(target, previous_target))
-        ):
-            robot._arm.move_j(target)
-            previous_target = target
+        robot._arm.move_j(target)
+        wait_for_target(robot, target)
         deadline = time.monotonic() + max(
             1.0 / FPS,
             float(sample["time"]) - (float(sequence[index - 1]["time"]) if index else 0.0),
