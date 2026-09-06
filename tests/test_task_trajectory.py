@@ -1,3 +1,4 @@
+import argparse
 import json
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from task_trajectory import (
     SAFE_BICEP_JOINTS,
     append_safe_bicep_return,
     command_recorded_gripper,
+    format_cli_float,
     interpolated_joint_trajectory,
     is_safe_bicep_pose,
     prepare_replay_samples,
@@ -17,6 +19,19 @@ from task_trajectory import (
 
 
 class TaskTrajectoryTest(unittest.TestCase):
+    def test_negative_near_zero_anchor_is_accepted_by_argparse(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--follower-anchor", type=float, nargs=7, required=True)
+        anchor = [-3.490658503988659e-05, -1.68, 0.023, 2.08, -0.026, 0.076, 1.5]
+
+        arguments = parser.parse_args([
+            "--follower-anchor",
+            *[format_cli_float(value) for value in anchor],
+        ])
+
+        for parsed, expected in zip(arguments.follower_anchor, anchor):
+            self.assertAlmostEqual(parsed, expected, places=16)
+
     def test_safe_bicep_recognizes_commanded_and_brake_settled_poses(self):
         self.assertTrue(is_safe_bicep_pose(SAFE_BICEP_JOINTS))
         self.assertTrue(is_safe_bicep_pose(SAFE_BICEP_BRAKED_JOINTS))

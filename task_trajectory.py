@@ -26,6 +26,10 @@ TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
 
 
+def format_cli_float(value: float) -> str:
+    return format(float(value), ".17f")
+
+
 def is_safe_bicep_pose(
     values: list[float],
     target_tolerance: float = 0.1,

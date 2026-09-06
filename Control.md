@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-open-safe-return-42`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-teach-anchor-cli-43`.
 
 ## Core Principles
 
@@ -291,6 +291,7 @@ Important replay rules:
 - Safe shutdown detects a current pose outside the J-command envelope and first runs the same proven Cartesian P recovery used by the GUI. It switches to J mode only after that recovery completes, preventing Teach shutdown from stalling at the command-envelope boundary.
 - Before Teach releases the joint brakes, it converts the final leader sample to follower coordinates and preloads that exact pose into the J controller. It enables into the preloaded hold and immediately reaffirms it, preventing the unsupported drop that previously occurred before Safe Bicep recovery began.
 - Before task handoff from a brake-settled pose, the GUI re-enables control, runs the proven Safe Bicep reset, verifies the commanded pose within 0.01 rad, and captures the live encoder values as the follower anchor. This removes the fixed offset between the physically taught path and replay coordinates.
+- Follower-anchor values are passed to the Teach subprocess as fixed-point decimals. Negative near-zero encoder readings therefore remain float arguments instead of being mistaken for command-line options due to scientific notation.
 - After converting a Teach recording to follower coordinates, post-processing appends an exact Safe Bicep endpoint with the gripper fully open at 0.1 m in width mode. Its duration is based on the largest remaining joint error at 0.4 rad/s with a 0.75 second minimum, while the 100 Hz replay interpolation supplies the intermediate arm commands.
 - Build 37 accidentally reused the joint-sample variable while reading gripper channels, producing `joints: ["width", value]`. Those files retain gripper motion but contain no arm trajectory and must be re-recorded with build 38; replay validation reports this explicitly.
 - Require exactly seven finite values in every recorded target.
