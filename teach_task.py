@@ -13,7 +13,7 @@ import numpy as np
 
 from lerobot_robot_nero import Nero, NeroConfig
 from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
-from task_trajectory import convert_leader_samples, smooth_move_to_target
+from task_trajectory import convert_leader_samples
 
 FPS = 15
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
@@ -129,58 +129,6 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         "samples": sequence,
     }, indent=2))
     print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
-    replay_trigger = output.with_suffix(".replay")
-    replay_trigger.unlink(missing_ok=True)
-    print("Waiting for Replay task from NERO Lab...")
-    while not replay_trigger.exists():
-        time.sleep(0.1)
-    replay_trigger.unlink(missing_ok=True)
-    print("Streaming recorded joint targets on their original timeline.")
-    robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-    robot._arm.set_speed_percent(25)
-    cv2.namedWindow("NERO task replay", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("NERO task replay", 1280, 480)
-    previous_gripper = None
-    smooth_move_to_target(robot, [float(value) for value in sequence[0]["joints"]], "Teach replay")
-    replay_started = time.monotonic()
-    for index, sample in enumerate(sequence):
-        target = [float(value) for value in sample["joints"]]
-        gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
-        if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
-            effector.move_gripper_m(value=gripper, force=30.0)
-            previous_gripper = gripper
-        robot._arm.move_js(target)
-        next_time = float(sequence[index + 1]["time"]) if index + 1 < len(sequence) else float(sample["time"]) + 1.0 / FPS
-        deadline = replay_started + next_time
-        while time.monotonic() < deadline:
-            observation = robot.get_observation()
-            frames = []
-            for key, label in (("observation.images.wrist", "wrist"), ("observation.images.overview", "overview")):
-                frame = observation.get(key)
-                if frame is None:
-                    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(frame, f"No {label} camera", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1, cv2.LINE_AA)
-                else:
-                    frame = np.asarray(frame)
-                    if frame.ndim == 3 and frame.shape[0] in (1, 3):
-                        frame = np.transpose(frame, (1, 2, 0))
-                    frame = np.clip(frame * 255.0 if frame.dtype != np.uint8 and frame.max() <= 1.0 else frame, 0, 255).astype(np.uint8)
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                frames.append(frame)
-            combined = np.hstack(frames)
-            cv2.putText(combined, "Joint replay - q: stop", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.imshow("NERO task replay", combined)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                replay_trigger = None
-                break
-            time.sleep(0.005)
-        if replay_trigger is None:
-            break
-    cv2.destroyAllWindows()
-    try:
-        robot.set_teach_mode(False)
-    except Exception:
-        pass
     robot.disconnect()
 
 

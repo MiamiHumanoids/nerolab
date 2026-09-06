@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import prepare_replay_samples
 
-APP_BUILD = "2026-09-06-exact-teach-replay-23"
+APP_BUILD = "2026-09-06-clean-task-replay-24"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -1125,10 +1125,6 @@ class NeroLab(tk.Tk):
             messagebox.showwarning("Task cannot be replayed", replay_error)
             return
         self.clear_activity_log()
-        if self.process and self.process.poll() is None and self.taught_task_file == task_file:
-            task_file.with_suffix(".replay").touch()
-            self.log_message("Replay requested for the active taught-task session")
-            return
         if not self._prepare_task_process(emergency_brake=False):
             return
         self.start_process(
