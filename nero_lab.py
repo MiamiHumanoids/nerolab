@@ -20,6 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
+APP_BUILD = "2026-09-06-control-debug-2"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -124,6 +125,7 @@ class NeroLab(tk.Tk):
         self.status_var = tk.StringVar(value="Ready")
         self.protocol("WM_DELETE_WINDOW", self.close_application)
         self._build_ui()
+        self.log_message(f"NERO Lab build {APP_BUILD} running from {Path(__file__).resolve()}")
         self.refresh_datasets()
         self.refresh_tasks()
 
