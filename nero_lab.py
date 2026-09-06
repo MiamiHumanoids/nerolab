@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-smooth-reset-12"
+APP_BUILD = "2026-09-06-copy-activity-14"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -28,6 +28,8 @@ UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
+RESET_SEGMENT_MAX_DELTA = 0.14
+RESET_BLEND_DISTANCE = 0.04
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
     (-1.74533, 1.74533),
@@ -229,6 +231,9 @@ class NeroLab(tk.Tk):
 
         log_frame = ttk.LabelFrame(right, text="Activity", padding=8)
         log_frame.pack(fill="both", expand=True, pady=(14, 0))
+        log_actions = ttk.Frame(log_frame)
+        log_actions.pack(fill="x", pady=(0, 6))
+        ttk.Button(log_actions, text="Copy Activity", command=self.copy_activity_log).pack(side="right")
         self.log = tk.Text(log_frame, wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True)
         ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=5).pack(fill="x", side="bottom")
@@ -242,6 +247,7 @@ class NeroLab(tk.Tk):
         ttk.Button(connection, text="Disconnect", command=self.disconnect_robot).pack(side="left", padx=8)
         ttk.Button(connection, text="Read joint angles", command=self.read_joint_angles).pack(side="left")
         ttk.Button(connection, text="Check arm status", command=self.check_arm_status).pack(side="left", padx=8)
+        ttk.Button(connection, text="Copy Activity", command=self.copy_activity_log).pack(side="left")
         ttk.Button(connection, text="Re-enable Arm", command=self.reenable_arm).pack(side="left", padx=8)
         ttk.Button(connection, text="Upright Reset", command=self.upright_reset).pack(side="right")
         self.arm_status_label = ttk.Label(parent, textvariable=self.arm_status_var, foreground="#555555")
@@ -523,11 +529,37 @@ class NeroLab(tk.Tk):
 
     def move_joint_path(self, robot: Nero, target: list[float], label: str) -> None:
         start = [float(value) for value in robot.get_joint_angles()]
-        move_result = robot._arm.move_j(target)
+        largest_delta = max(abs(goal - value) for value, goal in zip(start, target))
+        segment_count = max(1, int(largest_delta / RESET_SEGMENT_MAX_DELTA) + 1)
         self.log_message(
-            f"COMMAND {label} continuous move_j={move_result!r} "
+            f"COMMAND {label} blended J path has {segment_count} segment(s); "
             f"start={start} target={target}"
         )
+        for segment_index in range(1, segment_count + 1):
+            fraction = segment_index / segment_count
+            waypoint = [
+                value + (goal - value) * fraction
+                for value, goal in zip(start, target)
+            ]
+            move_result = robot._arm.move_j(waypoint)
+            self.log_message(
+                f"COMMAND {label} segment {segment_index}/{segment_count} "
+                f"move_j={move_result!r} target={[round(value, 6) for value in waypoint]}"
+            )
+            if segment_index == segment_count:
+                break
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                current = [float(value) for value in robot.get_joint_angles()]
+                if max(abs(value - goal) for value, goal in zip(current, waypoint)) <= RESET_BLEND_DISTANCE:
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError(
+                    f"{label} stalled before blend point {segment_index}/{segment_count}; "
+                    f"current joints={robot.get_joint_angles()}; target={waypoint}; "
+                    f"status={robot._arm.get_arm_status()}"
+                )
         self.wait_for_joint_target(robot, target, label)
 
     def emergency_brake(self) -> None:
@@ -550,6 +582,18 @@ class NeroLab(tk.Tk):
         try:
             self.log_arm_debug("Re-enable before recovery")
             robot.set_teach_mode(False)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                status = robot.get_arm_status()
+                message = getattr(status, "msg", status)
+                arm_status = str(getattr(message, "arm_status", ""))
+                if "EMERGENCY_STOP" not in arm_status and "BRAKE_NOT_RELEASED" not in arm_status:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError(
+                    f"Arm brakes did not release after re-enable: {self.arm_debug_text(robot)}"
+                )
             speed_result = robot._arm.set_speed_percent(100)
             self.speed_var.set(100.0)
             self.set_arm_status_display("Arm status: re-enabled")
@@ -770,6 +814,13 @@ class NeroLab(tk.Tk):
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
+
+    def copy_activity_log(self) -> None:
+        activity = self.log.get("1.0", "end-1c")
+        self.clipboard_clear()
+        self.clipboard_append(activity)
+        self.update_idletasks()
+        self.status_var.set("Activity debug info copied to clipboard")
 
     def refresh_datasets(self) -> None:
         DATASET_BASE.mkdir(parents=True, exist_ok=True)
