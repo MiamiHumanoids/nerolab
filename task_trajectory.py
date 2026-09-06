@@ -30,6 +30,7 @@ GRIPPER_OPEN_CONFIRMATION_S = 0.45
 GRIPPER_RELEASE_TOLERANCE_RAD = 0.01
 GRIPPER_RELEASE_WRIST_TOLERANCE_RAD = 0.005
 GRIPPER_RELEASE_TIMEOUT_S = 5.0
+GRIPPER_HOLD_REFRESH_S = 0.25
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
 
@@ -168,11 +169,15 @@ def is_amplified_gripper_opening(
 
 
 def wait_for_gripper_release_pose(robot: Any, target: list[float], label: str) -> float:
+    reachable_target = [
+        min(max(goal, lower), upper)
+        for goal, (lower, upper) in zip(target, COMMAND_JOINT_LIMITS)
+    ]
     started = time.monotonic()
     deadline = started + GRIPPER_RELEASE_TIMEOUT_S
     while time.monotonic() < deadline:
         current = [float(value) for value in robot.get_joint_angles()]
-        errors = [abs(value - goal) for value, goal in zip(current, target)]
+        errors = [abs(value - goal) for value, goal in zip(current, reachable_target)]
         if (
             max(errors[:4], default=0.0) <= GRIPPER_RELEASE_TOLERANCE_RAD
             and max(errors[4:], default=0.0) <= GRIPPER_RELEASE_WRIST_TOLERANCE_RAD
@@ -187,7 +192,8 @@ def wait_for_gripper_release_pose(robot: Any, target: list[float], label: str) -
         time.sleep(STREAM_INTERVAL_S)
     raise RuntimeError(
         f"{label}: release pose not reached in {GRIPPER_RELEASE_TIMEOUT_S:.1f}s; "
-        f"gripper remains closed. target={target} current={robot.get_joint_angles()}"
+        f"gripper remains closed. target={target} reachable={reachable_target} "
+        f"current={robot.get_joint_angles()}"
     )
 
 
@@ -209,11 +215,17 @@ def command_recorded_gripper(
     effector: Any,
     sample: dict[str, Any],
     previous: tuple[str, float] | None,
+    repeat: bool = False,
 ) -> tuple[str, float]:
     mode = str(sample.get("gripper_mode", "width"))
     value = float(sample.get("gripper", GRIPPER_OPEN_WIDTH_M))
     threshold = 0.5 if mode == "angle" else 0.0005
-    if previous is not None and mode == previous[0] and abs(value - previous[1]) <= threshold:
+    if (
+        not repeat
+        and previous is not None
+        and mode == previous[0]
+        and abs(value - previous[1]) <= threshold
+    ):
         return previous
     if mode == "angle":
         move = getattr(effector, "move_gripper_deg", None)

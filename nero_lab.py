@@ -27,7 +27,7 @@ from task_trajectory import (
     safe_bicep_recovery_pose,
 )
 
-APP_BUILD = "2026-09-06-near-safe-p-recovery-52"
+APP_BUILD = "2026-09-06-sustained-grip-53"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 UPRIGHT_RESET_JOINTS = [0.0] * 7

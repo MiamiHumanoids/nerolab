@@ -207,6 +207,21 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("width", 0.04, 30.0),
         ])
 
+    def test_gripper_replay_can_refresh_closed_holding_force(self):
+        class Effector:
+            def __init__(self):
+                self.calls = []
+
+            def move_gripper_m(self, value, force):
+                self.calls.append((value, force))
+
+        effector = Effector()
+        sample = {"gripper_mode": "width", "gripper": 0.0}
+        previous = command_recorded_gripper(effector, sample, None)
+        command_recorded_gripper(effector, sample, previous, repeat=True)
+
+        self.assertEqual(effector.calls, [(0.0, 30.0), (0.0, 30.0)])
+
     def test_gripper_replay_resets_control_before_configuring_range(self):
         events = []
 
@@ -271,7 +286,7 @@ class TaskTrajectoryTest(unittest.TestCase):
         self.assertEqual(amplified[25]["gripper"], 0.1)
 
     def test_amplified_opening_waits_for_recorded_release_pose(self):
-        target = [0.0] * 7
+        target = [0.0, -1.7594, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         class Arm:
             def __init__(self):
@@ -284,8 +299,8 @@ class TaskTrajectoryTest(unittest.TestCase):
             def __init__(self):
                 self._arm = Arm()
                 self.positions = [
-                    [0.02, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0],
-                    [0.009, 0.0, 0.0, 0.0, 0.0, 0.004, 0.0],
+                    [0.02, -1.72, 0.0, 0.0, 0.0, 0.01, 0.0],
+                    [0.009, -1.7453, 0.0, 0.0, 0.0, 0.004, 0.0],
                 ]
 
             def get_joint_angles(self):

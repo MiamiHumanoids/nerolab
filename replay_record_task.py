@@ -15,6 +15,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
+    GRIPPER_HOLD_REFRESH_S,
     GRIPPER_REPLAY_FORCE,
     amplify_gripper_samples,
     is_amplified_gripper_opening,
@@ -102,6 +103,7 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
     stop_requested = False
     try:
         previous_gripper: tuple[str, float] | None = None
+        last_closed_command_time: float | None = None
         smooth_move_with_recovery(
             robot,
             [float(value) for value in samples[0]["joints"]],
@@ -112,18 +114,30 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
             target = [float(value) for value in sample["joints"]]
             mode = str(sample.get("gripper_mode", "width"))
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
+            sample_time = float(sample["time"])
             robot._arm.move_js(target)
             if amplified_gripper and is_amplified_gripper_opening(sample, previous_gripper):
                 pause_started = time.monotonic()
                 wait_for_gripper_release_pose(robot, target, "Replay recording")
                 replay_started += time.monotonic() - pause_started
-            if previous_gripper is None or abs(gripper - previous_gripper[1]) > 0.002:
+            closed = amplified_gripper and mode == "width" and gripper == 0.0
+            repeat_closed = (
+                closed
+                and last_closed_command_time is not None
+                and sample_time - last_closed_command_time >= GRIPPER_HOLD_REFRESH_S
+            )
+            if (
+                previous_gripper is None
+                or abs(gripper - previous_gripper[1]) > 0.002
+                or repeat_closed
+            ):
                 effector.move_gripper_m(value=gripper, force=GRIPPER_REPLAY_FORCE)
                 print(
                     f"Gripper replay recording command: value={gripper:.6f} "
                     f"force={GRIPPER_REPLAY_FORCE:.1f}"
                 )
                 previous_gripper = (mode, gripper)
+                last_closed_command_time = sample_time if closed else None
             obs = robot.get_observation()
             state = np.asarray(obs["observation.state"], dtype=np.float32)
             wrist = rgb_image(obs.get("observation.images.wrist"), "wrist")
