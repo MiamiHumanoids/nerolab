@@ -8,10 +8,28 @@ from collections.abc import Callable
 from typing import Any
 
 SAFE_BICEP_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.5]
+SAFE_BICEP_BRAKED_JOINTS = [0.0, -1.7655, 0.023, 2.1964, -0.026, 0.0765, 1.6895]
 STREAM_INTERVAL_S = 0.02
 STREAM_SPEED_RAD_S = 0.4
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
+
+
+def is_safe_bicep_pose(
+    values: list[float],
+    target_tolerance: float = 0.1,
+    braked_tolerance: float = 0.06,
+) -> bool:
+    if len(values) != len(SAFE_BICEP_JOINTS):
+        return False
+    poses = (
+        (SAFE_BICEP_JOINTS, target_tolerance),
+        (SAFE_BICEP_BRAKED_JOINTS, braked_tolerance),
+    )
+    return any(
+        all(abs(float(value) - target) <= tolerance for value, target in zip(values, pose))
+        for pose, tolerance in poses
+    )
 
 
 def interpolated_joint_trajectory(

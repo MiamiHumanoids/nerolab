@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-large-window-35`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-braked-safe-bicep-36`.
 
 ## Core Principles
 
@@ -274,6 +274,7 @@ Important replay rules:
 - Let NERO Lab reconnect, verify Safe Bicep from live encoders, and launch Replay Task as a separate process. A disconnected GUI must connect and require Safe Bicep rather than launching replay from an unknown physical pose.
 - During the brief GUI-to-task subprocess handoff, release the GUI connection without changing motor state. Ordinary disconnect sends emergency stop and lets the arm descend smoothly from Safe Bicep to its mechanical resting pose. Nero v121 continues to report every joint as enabled during `EMERGENCY_STOP`, so enable bits are not used as brake confirmation and no subsequent `disable()` command is sent.
 - After emergency stop latches, disconnect monitors encoder motion until every joint changes by no more than 0.001 rad for 0.75 seconds, then closes CAN. If the resting pose does not settle within 8 seconds, disconnect aborts and leaves CAN connected.
+- The encoder-confirmed mechanical resting pose reached by braking from Safe Bicep is also classified as safe. On reconnect, the GUI recognizes that narrowly bounded pose and does not require another Safe Bicep reset before a task flow.
 - After Teach saves its samples, it returns to Safe Bicep under follower control, verifies the target, performs the same smooth emergency-stop settle, and only then closes the CAN connection. The Safe Bicep return and settling motion are not appended to the taught trajectory.
 - Standalone Replay and Replay-and-Record use the same shutdown helper: return to Safe Bicep at 25 percent, verify arrival, allow the emergency-stop descent to settle, then close CAN. They do not reset/re-enable the controller between the recorded trajectory and shutdown.
 - Use a clean connection with `reset_on_connect=False`.

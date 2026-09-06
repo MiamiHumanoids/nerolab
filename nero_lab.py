@@ -19,14 +19,14 @@ import re
 from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
-from task_trajectory import prepare_replay_samples
+from task_trajectory import SAFE_BICEP_JOINTS, is_safe_bicep_pose, prepare_replay_samples
 
-APP_BUILD = "2026-09-06-large-window-35"
+APP_BUILD = "2026-09-06-braked-safe-bicep-36"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
 UPRIGHT_RESET_JOINTS = [0.0] * 7
-SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
+SAFE_BICEP_RESET_JOINTS = SAFE_BICEP_JOINTS.copy()
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
 RESET_STREAM_INTERVAL_S = 0.02
@@ -343,11 +343,12 @@ class NeroLab(tk.Tk):
         self.robot.connect(calibrate=False)
         self.robot._arm.enable()
         self.robot._arm.set_speed_percent(100)
-        self.set_joint_slider_values(self.robot.get_joint_angles())
+        current_joints = self.robot.get_joint_angles()
+        self.set_joint_slider_values(current_joints)
         for enable_var, disable_var in zip(self.joint_enable_vars, self.joint_disable_vars):
             enable_var.set(True)
             disable_var.set(False)
-        self.safe_bicep_position_reached = False
+        self.safe_bicep_position_reached = self.is_safe_bicep_position(current_joints)
         status = self.robot.get_arm_status()
         status_text = str(getattr(status, "msg", status))
         if "EMERGENCY_STOP" in status_text or "EMERGENCY STOP" in status_text:
@@ -411,10 +412,7 @@ class NeroLab(tk.Tk):
         return result["proceed"]
 
     def is_safe_bicep_position(self, values: list[float], tolerance: float = 0.1) -> bool:
-        return len(values) == len(SAFE_BICEP_RESET_JOINTS) and all(
-            abs(float(value) - target) <= tolerance
-            for value, target in zip(values, SAFE_BICEP_RESET_JOINTS)
-        )
+        return is_safe_bicep_pose(values, target_tolerance=tolerance)
 
     def require_robot(self) -> Nero | None:
         if self.robot is None or not self.robot.is_connected:

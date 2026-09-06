@@ -4,15 +4,25 @@ from pathlib import Path
 from unittest.mock import patch
 
 from task_trajectory import (
+    SAFE_BICEP_BRAKED_JOINTS,
     SAFE_BICEP_JOINTS,
     command_recorded_gripper,
     interpolated_joint_trajectory,
+    is_safe_bicep_pose,
     prepare_replay_samples,
     safe_bicep_shutdown,
 )
 
 
 class TaskTrajectoryTest(unittest.TestCase):
+    def test_safe_bicep_recognizes_commanded_and_brake_settled_poses(self):
+        self.assertTrue(is_safe_bicep_pose(SAFE_BICEP_JOINTS))
+        self.assertTrue(is_safe_bicep_pose(SAFE_BICEP_BRAKED_JOINTS))
+        self.assertTrue(is_safe_bicep_pose([
+            0.00014, -1.765453, 0.022881, 2.19641, -0.025621, 0.07669, 1.689479
+        ]))
+        self.assertFalse(is_safe_bicep_pose([0.0] * 7))
+
     def test_legacy_cactus_recording_preserves_taught_joint_deltas(self):
         task_file = Path(__file__).parents[1] / "tasks" / "pick-up-the-cactus.json"
         recording = json.loads(task_file.read_text())
