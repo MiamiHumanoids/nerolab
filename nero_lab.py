@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-control-debug-2"
+APP_BUILD = "2026-09-06-control-debug-3"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -420,23 +420,42 @@ class NeroLab(tk.Tk):
         except Exception as exc:
             self.log_message(f"DEBUG {label}: status read failed: {exc}")
 
-    def prime_position_control(self, robot: Nero, label: str) -> None:
+    def prime_position_control(self, robot: Nero, label: str, timeout: float = 5.0) -> None:
         mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
         move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
         self.log_message(
             f"COMMAND {label} prime mode_p={mode_result!r} move_p={move_result!r} "
             f"target={CONTROL_PRIME_POSE}"
         )
-        time.sleep(0.5)
-        self.log_arm_debug(f"{label} 500ms after P prime")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = robot.get_arm_status()
+            message = getattr(status, "msg", status)
+            arm_status = str(getattr(message, "arm_status", ""))
+            if "NORMAL" in arm_status:
+                self.log_arm_debug(f"{label} P prime reached normal control")
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(f"{label} P prime did not clear controller fault: {self.arm_debug_text(robot)}")
         mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
         self.log_message(f"COMMAND {label} switch mode_j returned {mode_result!r}")
 
-    def controller_requires_prime(self, robot: Nero) -> bool:
+    def controller_has_kinematic_fault(self, robot: Nero) -> bool:
         status = robot.get_arm_status()
         message = getattr(status, "msg", status)
         arm_status = str(getattr(message, "arm_status", ""))
         return "SINGULARITY" in arm_status or "NO_SOLUTION" in arm_status
+
+    def prepare_reset_motion(self, robot: Nero, label: str) -> None:
+        if self.controller_has_kinematic_fault(robot):
+            self.log_message(f"DEBUG {label} detected kinematic fault; recovering and priming P control")
+            robot.set_teach_mode(False)
+            self.log_arm_debug(f"{label} after controller recovery")
+            self.prime_position_control(robot, label)
+        else:
+            mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
+            self.log_message(f"COMMAND {label} controller already normal; mode_j returned {mode_result!r}")
 
     def emergency_brake(self) -> None:
         robot = self.require_robot()
@@ -487,9 +506,10 @@ class NeroLab(tk.Tk):
             targets = [max(lower, min(upper, variable.get())) for variable, (lower, upper) in zip(self.joint_vars, limits)]
             self.safe_bicep_position_reached = False
             self.log_arm_debug(f"slider before move_j target={targets}")
-            if self.controller_requires_prime(robot):
-                self.log_message("DEBUG slider detected kinematic fault; running P-to-J control prime")
-                self.prime_position_control(robot, "slider")
+            if self.controller_has_kinematic_fault(robot):
+                self.set_joint_slider_values(robot.get_joint_angles())
+                self.log_message("COMMAND slider blocked: controller has a kinematic fault; use Upright Reset or Safe Bicep Reset first")
+                return
             mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
             move_result = robot._arm.move_j(targets)
             self.log_message(f"COMMAND slider mode_j={mode_result!r} move_j={move_result!r} target={targets}")
@@ -564,10 +584,8 @@ class NeroLab(tk.Tk):
         self.safe_bicep_position_reached = False
         try:
             self.log_arm_debug(f"Upright Reset before recovery target={UPRIGHT_RESET_JOINTS}")
-            robot.set_teach_mode(False)
-            self.log_arm_debug("Upright Reset after recovery")
+            self.prepare_reset_motion(robot, "Upright Reset")
             speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            self.prime_position_control(robot, "Upright Reset")
             move_result = robot._arm.move_j(UPRIGHT_RESET_JOINTS)
             self.log_message(
                 f"COMMAND Upright Reset speed={speed_result!r} move_j={move_result!r} "
@@ -612,10 +630,8 @@ class NeroLab(tk.Tk):
         self.cancel_slider_motion()
         try:
             self.log_arm_debug(f"Safe Bicep before recovery target={SAFE_BICEP_RESET_JOINTS}")
-            robot.set_teach_mode(False)
-            self.log_arm_debug("Safe Bicep after recovery")
+            self.prepare_reset_motion(robot, "Safe Bicep")
             speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            self.prime_position_control(robot, "Safe Bicep")
             move_result = robot._arm.move_j(SAFE_BICEP_RESET_JOINTS)
             self.log_message(
                 f"COMMAND Safe Bicep speed={speed_result!r} move_j={move_result!r} "
@@ -829,7 +845,7 @@ class NeroLab(tk.Tk):
         if not task:
             messagebox.showwarning("Task required", "Enter a task instruction first.")
             return
-        if not self._prepare_task_process():
+        if not self._prepare_task_process(emergency_brake=False):
             return
         TASK_BASE.mkdir(parents=True, exist_ok=True)
         output = TASK_BASE / f"{self._task_slug(task)}.json"
