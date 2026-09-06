@@ -25,6 +25,7 @@ GRIPPER_OPEN_WIDTH_M = 0.1
 GRIPPER_REPLAY_FORCE = 30.0
 GRIPPER_CLOSE_THRESHOLD_M = 0.085
 GRIPPER_OPEN_THRESHOLD_M = 0.098
+GRIPPER_OPEN_CONFIRMATION_S = 0.45
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
 
@@ -91,30 +92,42 @@ def stream_recorded_trajectory(
             sample_callback(samples[sample_index], sample_index)
 
 
-def replay_gripper_target(
-    sample: dict[str, Any],
-    previous: tuple[str, float] | None,
-    amplified: bool = False,
-) -> tuple[str, float]:
-    mode = str(sample.get("gripper_mode", "width"))
-    value = float(sample.get("gripper", GRIPPER_OPEN_WIDTH_M))
-    if not amplified or mode != "width":
-        return mode, value
-    was_closed = previous is not None and previous[0] == "width" and previous[1] == 0.0
-    if was_closed:
-        value = GRIPPER_OPEN_WIDTH_M if value >= GRIPPER_OPEN_THRESHOLD_M else 0.0
-    else:
-        value = 0.0 if value <= GRIPPER_CLOSE_THRESHOLD_M else GRIPPER_OPEN_WIDTH_M
-    return mode, value
+def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    amplified: list[dict[str, Any]] = []
+    closed = False
+    opening_started: float | None = None
+    for sample in samples:
+        processed = dict(sample)
+        mode = str(sample.get("gripper_mode", "width"))
+        if mode == "width":
+            value = float(sample.get("gripper", GRIPPER_OPEN_WIDTH_M))
+            sample_time = float(sample["time"])
+            if not closed and value <= GRIPPER_CLOSE_THRESHOLD_M:
+                closed = True
+            if closed:
+                if value >= GRIPPER_OPEN_THRESHOLD_M:
+                    if opening_started is None:
+                        opening_started = sample_time
+                    elif sample_time - opening_started >= GRIPPER_OPEN_CONFIRMATION_S:
+                        closed = False
+                        opening_started = None
+                else:
+                    opening_started = None
+            processed["gripper"] = 0.0 if closed else GRIPPER_OPEN_WIDTH_M
+        amplified.append(processed)
+    if amplified and str(samples[-1].get("gripper_mode", "width")) == "width":
+        if float(samples[-1].get("gripper", GRIPPER_OPEN_WIDTH_M)) >= GRIPPER_OPEN_THRESHOLD_M:
+            amplified[-1]["gripper"] = GRIPPER_OPEN_WIDTH_M
+    return amplified
 
 
 def command_recorded_gripper(
     effector: Any,
     sample: dict[str, Any],
     previous: tuple[str, float] | None,
-    amplified: bool = False,
 ) -> tuple[str, float]:
-    mode, value = replay_gripper_target(sample, previous, amplified)
+    mode = str(sample.get("gripper_mode", "width"))
+    value = float(sample.get("gripper", GRIPPER_OPEN_WIDTH_M))
     threshold = 0.5 if mode == "angle" else 0.0005
     if previous is not None and mode == previous[0] and abs(value - previous[1]) <= threshold:
         return previous
@@ -127,7 +140,7 @@ def command_recorded_gripper(
     move(value=value, force=GRIPPER_REPLAY_FORCE)
     print(
         f"Gripper replay sample: mode={mode} value={value:.6f} "
-        f"force={GRIPPER_REPLAY_FORCE:.1f} amplified={amplified}"
+        f"force={GRIPPER_REPLAY_FORCE:.1f}"
     )
     return mode, value
 

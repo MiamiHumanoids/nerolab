@@ -7,6 +7,7 @@ from unittest.mock import patch
 from task_trajectory import (
     SAFE_BICEP_BRAKED_JOINTS,
     SAFE_BICEP_JOINTS,
+    amplify_gripper_samples,
     append_safe_bicep_return,
     command_recorded_gripper,
     format_cli_float,
@@ -190,28 +191,31 @@ class TaskTrajectoryTest(unittest.TestCase):
         ])
 
     def test_amplified_gripper_is_binary_with_delayed_opening(self):
-        class Effector:
-            def __init__(self):
-                self.calls = []
+        samples = [
+            {"time": 0.0, "gripper_mode": "width", "gripper": 0.1},
+            {"time": 0.1, "gripper_mode": "width", "gripper": 0.08},
+            {"time": 0.2, "gripper_mode": "width", "gripper": 0.099},
+            {"time": 0.5, "gripper_mode": "width", "gripper": 0.099},
+            {"time": 0.66, "gripper_mode": "width", "gripper": 0.099},
+        ]
 
-            def move_gripper_m(self, value, force):
-                self.calls.append((value, force))
+        amplified = amplify_gripper_samples(samples)
 
-        effector = Effector()
-        previous = None
-        for value in (0.1, 0.08, 0.09, 0.097, 0.099):
-            previous = command_recorded_gripper(
-                effector,
-                {"gripper_mode": "width", "gripper": value},
-                previous,
-                amplified=True,
-            )
+        self.assertEqual(
+            [sample["gripper"] for sample in amplified],
+            [0.1, 0.0, 0.0, 0.0, 0.1],
+        )
+        self.assertEqual([sample["gripper"] for sample in samples], [0.1, 0.08, 0.099, 0.099, 0.099])
 
-        self.assertEqual(effector.calls, [
-            (0.1, 30.0),
-            (0.0, 30.0),
-            (0.1, 30.0),
-        ])
+    def test_amplified_gripper_preserves_terminal_open_command(self):
+        samples = [
+            {"time": 0.0, "gripper_mode": "width", "gripper": 0.04},
+            {"time": 1.0, "gripper_mode": "width", "gripper": 0.1},
+        ]
+
+        amplified = amplify_gripper_samples(samples)
+
+        self.assertEqual([sample["gripper"] for sample in amplified], [0.0, 0.1])
 
     def test_safe_shutdown_moves_brakes_then_disconnects(self):
         events = []

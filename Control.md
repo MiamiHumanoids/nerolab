@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-binary-gripper-46`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-delayed-binary-gripper-47`.
 
 ## Core Principles
 
@@ -294,7 +294,7 @@ Important replay rules:
 - Follower-anchor values are passed to the Teach subprocess as fixed-point decimals. Negative near-zero encoder readings therefore remain float arguments instead of being mistaken for command-line options due to scientific notation.
 - After converting a Teach recording to follower coordinates, post-processing appends an exact Safe Bicep endpoint with the gripper fully open at 0.1 m in width mode. Its duration is based on the largest remaining joint error at 0.4 rad/s with a 0.75 second minimum, while the 100 Hz replay interpolation supplies the intermediate arm commands.
 - Taught-task replay commands the gripper with force 30.0 in both normal Replay and Replay-and-Record flows.
-- The GUI enables `Amplify gripper during replay` by default for both replay flows. In amplified width mode the gripper is binary: a taught width at or below 0.085 m commands fully closed at 0.0 m, and it remains closed until the taught width reaches 0.098 m, when it commands fully open at 0.1 m. This hysteresis prevents intermediate commands and early release. Angle-mode recordings retain their taught values because their open range is not reliably encoded; all modes use force 30.0.
+- The GUI enables `Amplify gripper during replay` by default for both replay flows. In amplified width mode the gripper is binary: a taught width at or below 0.085 m commands fully closed at 0.0 m, and it remains closed until the taught width stays at or above 0.098 m for 0.45 seconds, when it commands fully open at 0.1 m. This confirmation delay prevents intermediate commands and shifts release toward the completed return pose. Angle-mode recordings retain their taught values because their open range is not reliably encoded; all modes use force 30.0.
 - Build 37 accidentally reused the joint-sample variable while reading gripper channels, producing `joints: ["width", value]`. Those files retain gripper motion but contain no arm trajectory and must be re-recorded with build 38; replay validation reports this explicitly.
 - Require exactly seven finite values in every recorded target.
 - Do not reject or clamp a taught target against the reset and GUI application envelope. If teach mode can record the pose, replay sends that converted pose exactly.

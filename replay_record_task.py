@@ -16,8 +16,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
     GRIPPER_REPLAY_FORCE,
+    amplify_gripper_samples,
     prepare_replay_samples,
-    replay_gripper_target,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
 )
@@ -50,6 +50,8 @@ def rgb_image(value: object, label: str) -> np.ndarray:
 def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -> None:
     recording = json.loads(task_file.read_text())
     samples = prepare_replay_samples(recording)
+    if amplified_gripper:
+        samples = amplify_gripper_samples(samples)
     task = str(recording.get("task", task_file.stem))
 
     if dataset_root.exists():
@@ -106,10 +108,8 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
         replay_started = time.monotonic()
         for index, sample in enumerate(samples):
             target = [float(value) for value in sample["joints"]]
-            mode, gripper = replay_gripper_target(
-                sample, previous_gripper, amplified_gripper
-            )
-            gripper = float(np.clip(gripper, 0.0, 0.1))
+            mode = str(sample.get("gripper_mode", "width"))
+            gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
             if previous_gripper is None or abs(gripper - previous_gripper[1]) > 0.002:
                 effector.move_gripper_m(value=gripper, force=GRIPPER_REPLAY_FORCE)
                 previous_gripper = (mode, gripper)

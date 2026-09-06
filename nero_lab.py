@@ -26,7 +26,7 @@ from task_trajectory import (
     prepare_replay_samples,
 )
 
-APP_BUILD = "2026-09-06-binary-gripper-46"
+APP_BUILD = "2026-09-06-delayed-binary-gripper-47"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
+    amplify_gripper_samples,
     command_recorded_gripper,
     prepare_replay_samples,
     safe_bicep_shutdown,
@@ -35,6 +36,8 @@ def arm_status_text(robot: Nero) -> str:
 def main(task_file: Path, amplified_gripper: bool = False) -> None:
     recording = json.loads(task_file.read_text())
     samples = prepare_replay_samples(recording)
+    if amplified_gripper:
+        samples = amplify_gripper_samples(samples)
 
     robot = Nero(NeroConfig(
         id="nero_task_replay",
@@ -82,9 +85,7 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
         print(f"Recorded trajectory speed set to {TRAJECTORY_SPEED_PERCENT}%.")
         def apply_sample(sample: dict[str, object], index: int) -> None:
             nonlocal previous_gripper
-            previous_gripper = command_recorded_gripper(
-                effector, sample, previous_gripper, amplified=amplified_gripper
-            )
+            previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")
         stream_recorded_trajectory(robot, samples, apply_sample)
