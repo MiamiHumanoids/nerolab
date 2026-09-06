@@ -203,8 +203,8 @@ class TaskTrajectoryTest(unittest.TestCase):
         )
 
         self.assertEqual(effector.calls, [
-            ("angle", 17.5, 30.0),
-            ("width", 0.04, 30.0),
+            ("angle", 17.5, 3.0),
+            ("width", 0.04, 3.0),
         ])
 
     def test_gripper_replay_latches_single_closed_command(self):
@@ -220,7 +220,7 @@ class TaskTrajectoryTest(unittest.TestCase):
         previous = command_recorded_gripper(effector, sample, None)
         command_recorded_gripper(effector, sample, previous)
 
-        self.assertEqual(effector.calls, [(0.0, 30.0)])
+        self.assertEqual(effector.calls, [(0.0, 3.0)])
 
     def test_gripper_replay_resets_control_before_configuring_range(self):
         events = []
