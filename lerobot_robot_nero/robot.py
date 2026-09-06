@@ -164,7 +164,9 @@ class Nero(Robot):
         elif hasattr(self._arm, "set_motion_mode"):
             self._arm.set_motion_mode("J")
 
-    def set_teach_mode(self, enabled: bool = True) -> None:
+    def set_teach_mode(
+        self, enabled: bool = True, hold_target: list[float] | None = None
+    ) -> None:
         if self._arm is None:
             raise RuntimeError("Nero is not connected")
         if enabled:
@@ -188,6 +190,14 @@ class Nero(Robot):
             if hasattr(self._arm, "reset"):
                 self._arm.reset()
                 time.sleep(1.0)
+            self.configure()
+            if hold_target is not None:
+                move_js = getattr(self._arm, "move_js", None)
+                if move_js is None:
+                    raise RuntimeError(
+                        "NERO arm cannot preload the taught pose before releasing brakes"
+                    )
+                move_js([float(value) for value in hold_target])
             if hasattr(self._arm, "enable"):
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline:
@@ -196,7 +206,8 @@ class Nero(Robot):
                     time.sleep(0.1)
                 else:
                     raise RuntimeError("NERO arm joints did not re-enable after leaving Teach mode")
-            self.configure()
+            if hold_target is not None:
+                self._arm.move_js([float(value) for value in hold_target])
             self._teach_mode_enabled = False
 
     def get_joint_angles(self) -> list[float]:

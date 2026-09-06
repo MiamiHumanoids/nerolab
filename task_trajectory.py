@@ -109,6 +109,16 @@ def convert_leader_samples(
 ) -> list[dict[str, Any]]:
     if not samples:
         return []
+    first_joints = samples[0].get("joints", [])
+    if (
+        isinstance(first_joints, (list, tuple))
+        and len(first_joints) == 2
+        and first_joints[0] in {"width", "angle"}
+    ):
+        raise ValueError(
+            "This task was recorded by build 37 with corrupted joint samples; "
+            "the arm trajectory is not recoverable. Re-record the task with build 38."
+        )
     leader_start = [float(value) for value in samples[0]["joints"]]
     offsets = [anchor - start for anchor, start in zip(follower_anchor, leader_start)]
     converted: list[dict[str, Any]] = []

@@ -136,6 +136,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     print("Teach mode active. Move the robot manually; samples are recorded at 15 FPS.")
     print("Press q in the teach window to save the task.")
 
+    shutdown_hold_target: list[float] | None = None
     try:
         robot.set_teach_mode(True)
         enable_can_feedback_push(robot._arm)
@@ -158,25 +159,25 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         while True:
             now = time.monotonic()
             if now >= next_sample:
-                state = [float(value) for value in robot.get_teach_joint_angles()]
+                joint_state = [float(value) for value in robot.get_teach_joint_angles()]
                 channels = read_gripper_channels(effector)
-                for source, (state, timestamp, hz) in channels.items():
+                for source, (gripper_state, timestamp, hz) in channels.items():
                     baseline = channel_baselines.get(source, 0.0)
                     previous_state = channel_states.get(source)
                     source_changed = previous_state is not None and (
-                        state[0] != previous_state[0]
-                        or abs(state[1] - previous_state[1]) > 0.0001
+                        gripper_state[0] != previous_state[0]
+                        or abs(gripper_state[1] - previous_state[1]) > 0.0001
                     )
                     if timestamp > baseline and source_changed:
                         active_gripper_source = source
-                        last_gripper = state
+                        last_gripper = gripper_state
                         print(
                             f"Teach gripper source={source} timestamp={timestamp:.6f} "
                             f"hz={hz:.1f}",
                             flush=True,
                         )
                     channel_baselines[source] = max(baseline, timestamp)
-                    channel_states[source] = state
+                    channel_states[source] = gripper_state
                 threshold = 0.5 if last_gripper[0] == "angle" else 0.0005
                 if (
                     last_reported_gripper is None
@@ -191,7 +192,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
                     last_reported_gripper = last_gripper
                 sequence.append({
                     "time": time.monotonic(),
-                    "joints": state,
+                    "joints": joint_state,
                     "gripper": last_gripper[1],
                     "gripper_mode": last_gripper[0],
                 })
@@ -206,6 +207,11 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
             cv2.imshow("NERO teach task", canvas)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
+                if sequence:
+                    converted = convert_leader_samples(sequence, follower_anchor)
+                    shutdown_hold_target = [
+                        float(value) for value in converted[-1]["joints"]
+                    ]
                 break
             time.sleep(0.005)
     finally:
@@ -214,7 +220,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         except Exception:
             pass
         finally:
-            robot.set_teach_mode(False)
+            robot.set_teach_mode(False, hold_target=shutdown_hold_target)
             cv2.destroyAllWindows()
 
     if len(sequence) < 2:

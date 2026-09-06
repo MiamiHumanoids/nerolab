@@ -25,6 +25,8 @@ class TaskTrajectoryTest(unittest.TestCase):
 
     def test_legacy_cactus_recording_preserves_taught_joint_deltas(self):
         task_file = Path(__file__).parents[1] / "tasks" / "pick-up-the-cactus.json"
+        if not task_file.exists():
+            self.skipTest("legacy cactus task fixture is not present")
         recording = json.loads(task_file.read_text())
 
         samples = prepare_replay_samples(recording)
@@ -89,6 +91,15 @@ class TaskTrajectoryTest(unittest.TestCase):
         })
 
         self.assertEqual(prepared[1]["joints"][5], anchor[5] + 0.973745)
+
+    def test_build_37_corrupted_recording_has_clear_error(self):
+        samples = [
+            {"time": 0.0, "joints": ["width", 0.099], "gripper": 0.099},
+            {"time": 0.1, "joints": ["width", 0.050], "gripper": 0.050},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "Re-record the task with build 38"):
+            prepare_replay_samples({"joint_space": "leader", "samples": samples})
 
     def test_interpolation_hits_recorded_samples_with_20ms_max_spacing(self):
         samples = [

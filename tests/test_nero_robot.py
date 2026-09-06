@@ -44,6 +44,7 @@ def test_teach_mode_helpers_expose_sdk_methods():
         def __init__(self):
             self.mode = "idle"
             self.events = []
+            self.targets = []
 
         def is_connected(self):
             return True
@@ -65,6 +66,12 @@ def test_teach_mode_helpers_expose_sdk_methods():
             self.events.append("enable")
             return True
 
+        def set_motion_mode(self, mode):
+            self.events.append("motion_mode")
+
+        def move_js(self, target):
+            self.targets.append(target)
+
         def get_leader_joint_angles(self):
             return [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
 
@@ -74,9 +81,11 @@ def test_teach_mode_helpers_expose_sdk_methods():
     assert robot._arm.mode == "leader"
     assert robot.get_teach_joint_angles() == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
 
-    robot.set_teach_mode(False)
+    hold_target = [0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
+    robot.set_teach_mode(False, hold_target=hold_target)
     assert robot._arm.mode == "follower"
-    assert robot._arm.events == ["follower", "reset", "enable"]
+    assert robot._arm.events == ["follower", "reset", "motion_mode", "enable"]
+    assert robot._arm.targets == [hold_target, hold_target]
     assert robot._teach_mode_enabled is False
 
 

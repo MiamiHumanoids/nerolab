@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import SAFE_BICEP_JOINTS, is_safe_bicep_pose, prepare_replay_samples
 
-APP_BUILD = "2026-09-06-teach-recovery-gripper-37"
+APP_BUILD = "2026-09-06-supported-teach-exit-38"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
