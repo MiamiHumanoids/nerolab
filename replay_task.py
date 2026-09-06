@@ -42,7 +42,6 @@ def arm_status_text(robot: Nero) -> str:
 
 
 def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
-    time.sleep(0.05)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if joints_are_close(robot, target, tolerance=JOINT_TOLERANCE):
@@ -61,6 +60,24 @@ def joints_are_close(robot: Nero, target: list[float], tolerance: float = 0.01) 
     except Exception:
         return False
     return all(abs(float(value) - goal) <= tolerance for value, goal in zip(current, target))
+
+
+def move_to_recorded_target(robot: Nero, target: list[float]) -> None:
+    status = robot.get_arm_status()
+    message = getattr(status, "msg", status)
+    ctrl_mode = getattr(message, "ctrl_mode", None)
+    linkage_mode = "LINKAGE" in str(ctrl_mode)
+    try:
+        linkage_mode = linkage_mode or int(ctrl_mode) == 6
+    except (TypeError, ValueError):
+        pass
+
+    robot._arm.move_j(target)
+    if linkage_mode:
+        time.sleep(0.25)
+        print("Control transitioned from linkage to CAN; resending the first recorded target.")
+        robot._arm.move_j(target)
+    wait_for_target(robot, target)
 
 
 def main(task_file: Path) -> None:
@@ -87,20 +104,7 @@ def main(task_file: Path) -> None:
         raise RuntimeError("NERO gripper effector is unavailable")
     if hasattr(effector, "set_gripper_teaching_pendant_param"):
         effector.set_gripper_teaching_pendant_param(max_range_config=0.1, timeout=5.0)
-    robot._arm.set_follower_mode()
-    robot._teach_mode_enabled = False
-    if hasattr(robot._arm, "reset"):
-        robot._arm.reset()
-    if hasattr(robot._arm, "enable"):
-        deadline = time.monotonic() + 5.0
-        enabled = False
-        while time.monotonic() < deadline:
-            enabled = bool(robot._arm.enable())
-            if enabled:
-                break
-            time.sleep(0.1)
-        if not enabled:
-            raise RuntimeError(f"Replay could not enable the arm: {arm_status_text(robot)}")
+    robot.set_teach_mode(False)
     if hasattr(robot._arm, "get_joints_enable_status_list"):
         enabled = robot._arm.get_joints_enable_status_list()
         if not all(enabled):
@@ -125,8 +129,7 @@ def main(task_file: Path) -> None:
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
                 effector.move_gripper_m(value=gripper, force=30.0)
                 previous_gripper = gripper
-            robot._arm.move_j(target)
-            wait_for_target(robot, target)
+            move_to_recorded_target(robot, target)
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")
             previous_time = float(samples[index - 1]["time"]) if index else 0.0

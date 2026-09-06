@@ -469,7 +469,10 @@ class NeroLab(tk.Tk):
             return
         self.safe_bicep_position_reached = False
         try:
-            robot.set_teach_mode(False)
+            if robot._teach_mode_enabled:
+                robot.set_teach_mode(False)
+            else:
+                robot.configure()
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
@@ -478,7 +481,7 @@ class NeroLab(tk.Tk):
             robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             robot._arm.move_j([0.0] * 7)
-            self.wait_for_motion(robot, "zero joint reset")
+            self.wait_for_joint_target(robot, [0.0] * 7, "zero joint reset")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
             robot._arm.set_speed_percent(100)
         except Exception as exc:
@@ -494,6 +497,7 @@ class NeroLab(tk.Tk):
         self.log_message("Upright Reset sent: joints 0,0,0,0,0,0,0; gripper 0.1 m")
 
     def wait_for_motion(self, robot: Nero, label: str, timeout: float = 8.0) -> None:
+        time.sleep(0.05)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             status = robot._arm.get_arm_status()
@@ -502,6 +506,18 @@ class NeroLab(tk.Tk):
                 return
             time.sleep(0.05)
         raise RuntimeError(f"{label} did not reach its target: {robot._arm.get_arm_status()}")
+
+    def wait_for_joint_target(self, robot: Nero, target: list[float], label: str, timeout: float = 8.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current = robot.get_joint_angles()
+            if all(abs(float(value) - goal) <= 0.01 for value, goal in zip(current, target)):
+                return
+            time.sleep(0.02)
+        raise RuntimeError(
+            f"{label} did not reach target {target}; current joints={robot.get_joint_angles()}; "
+            f"status={robot._arm.get_arm_status()}"
+        )
 
     def safe_bicep_reset(self) -> None:
         robot = self.require_robot()
@@ -514,7 +530,10 @@ class NeroLab(tk.Tk):
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline and not robot._arm.enable():
                     time.sleep(0.1)
-            robot.set_teach_mode(False)
+            if robot._teach_mode_enabled:
+                robot.set_teach_mode(False)
+            else:
+                robot.configure()
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
             robot._arm.move_p(UPRIGHT_APPROACH_POSE)
@@ -522,7 +541,7 @@ class NeroLab(tk.Tk):
             robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             robot._arm.move_j(SAFE_BICEP_RESET_JOINTS)
-            self.wait_for_motion(robot, "Safe Bicep Reset")
+            self.wait_for_joint_target(robot, SAFE_BICEP_RESET_JOINTS, "Safe Bicep Reset")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
             robot._arm.set_speed_percent(100)
         except Exception as exc:

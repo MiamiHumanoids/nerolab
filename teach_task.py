@@ -18,15 +18,6 @@ FPS = 15
 JOINT_TOLERANCE = 0.01
 MOTION_TIMEOUT = 5.0
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
-JOINT_LIMITS = [
-    (-2.695261, 2.695261),
-    (-1.73533, 1.73533),
-    (-2.747621, 2.747621),
-    (-1.002291, 2.136755),
-    (-2.747621, 2.747621),
-    (-0.723039, 0.949932),
-    (-1.560797, 1.560797),
-]
 
 
 def read_gripper_width(effector, fallback: float = 0.1) -> float:
@@ -41,7 +32,6 @@ def read_gripper_width(effector, fallback: float = 0.1) -> float:
 
 
 def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
-    time.sleep(0.05)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         current = robot.get_joint_angles()
@@ -51,6 +41,24 @@ def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TI
     raise RuntimeError(
         f"Replay did not reach recorded target {target}; current joints={robot.get_joint_angles()}"
     )
+
+
+def move_to_recorded_target(robot: Nero, target: list[float]) -> None:
+    status = robot.get_arm_status()
+    message = getattr(status, "msg", status)
+    ctrl_mode = getattr(message, "ctrl_mode", None)
+    linkage_mode = "LINKAGE" in str(ctrl_mode)
+    try:
+        linkage_mode = linkage_mode or int(ctrl_mode) == 6
+    except (TypeError, ValueError):
+        pass
+
+    robot._arm.move_j(target)
+    if linkage_mode:
+        time.sleep(0.25)
+        print("Control transitioned from linkage to CAN; resending the first recorded target.")
+        robot._arm.move_j(target)
+    wait_for_target(robot, target)
 
 
 def main(task: str, output: Path) -> None:
@@ -92,13 +100,7 @@ def main(task: str, output: Path) -> None:
         while True:
             now = time.monotonic()
             if now >= next_sample:
-                raw_state = [float(value) for value in robot.get_teach_joint_angles()]
-                state = [
-                    max(lower, min(upper, value))
-                    for value, (lower, upper) in zip(raw_state, JOINT_LIMITS)
-                ]
-                if state != raw_state:
-                    print(f"Clamped taught joint sample: {raw_state} -> {state}")
+                state = [float(value) for value in robot.get_teach_joint_angles()]
                 last_gripper = read_gripper_width(effector, last_gripper)
                 sequence.append({
                     "time": time.monotonic(),
@@ -153,8 +155,7 @@ def main(task: str, output: Path) -> None:
         if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
             effector.move_gripper_m(value=gripper, force=30.0)
             previous_gripper = gripper
-        robot._arm.move_j(target)
-        wait_for_target(robot, target)
+        move_to_recorded_target(robot, target)
         deadline = time.monotonic() + max(
             1.0 / FPS,
             float(sample["time"]) - (float(sequence[index - 1]["time"]) if index else 0.0),

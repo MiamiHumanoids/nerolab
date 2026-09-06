@@ -176,12 +176,14 @@ class Nero(Robot):
         else:
             if hasattr(self._arm, "set_follower_mode"):
                 self._arm.set_follower_mode()
+                time.sleep(0.5)
             elif hasattr(self._arm, "set_normal_mode"):
                 self._arm.set_normal_mode()
             else:
                 raise AttributeError("Nero robot does not expose a non-teach mode API")
             if hasattr(self._arm, "reset"):
                 self._arm.reset()
+                time.sleep(1.0)
             if hasattr(self._arm, "enable"):
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline:

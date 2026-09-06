@@ -43,7 +43,6 @@ def rgb_image(value: object, label: str) -> np.ndarray:
 
 
 def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
-    time.sleep(0.05)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         current = robot.get_joint_angles()
@@ -53,6 +52,24 @@ def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TI
     raise RuntimeError(
         f"Replay did not reach recorded target {target}; current joints={robot.get_joint_angles()}"
     )
+
+
+def move_to_recorded_target(robot: Nero, target: list[float]) -> None:
+    status = robot.get_arm_status()
+    message = getattr(status, "msg", status)
+    ctrl_mode = getattr(message, "ctrl_mode", None)
+    linkage_mode = "LINKAGE" in str(ctrl_mode)
+    try:
+        linkage_mode = linkage_mode or int(ctrl_mode) == 6
+    except (TypeError, ValueError):
+        pass
+
+    robot._arm.move_j(target)
+    if linkage_mode:
+        time.sleep(0.25)
+        print("Control transitioned from linkage to CAN; resending the first recorded target.")
+        robot._arm.move_j(target)
+    wait_for_target(robot, target)
 
 
 def main(task_file: Path, dataset_root: Path) -> None:
@@ -118,8 +135,7 @@ def main(task_file: Path, dataset_root: Path) -> None:
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
                 effector.move_gripper_m(value=gripper, force=30.0)
                 previous_gripper = gripper
-            robot._arm.move_j(target)
-            wait_for_target(robot, target)
+            move_to_recorded_target(robot, target)
             duration = float(sample["time"]) - (float(samples[index - 1]["time"]) if index else 0.0)
             deadline = time.monotonic() + max(1.0 / 15.0, duration)
             while time.monotonic() < deadline:
