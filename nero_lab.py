@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import prepare_replay_samples
 
-APP_BUILD = "2026-09-06-full-activity-trace-25"
+APP_BUILD = "2026-09-06-verified-replay-start-26"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -1059,12 +1059,19 @@ class NeroLab(tk.Tk):
 
     def _prepare_task_process(self, emergency_brake: bool = True) -> bool:
         if self.robot is None or not self.robot.is_connected:
-            return True
+            try:
+                self.connect_robot()
+            except Exception as exc:
+                messagebox.showerror("Arm connection failed", str(exc))
+                return False
+        if self.robot is None or not self.robot.is_connected:
+            return False
         try:
             current = self.robot.get_joint_angles()
-            safe = self.safe_bicep_position_reached or self.is_safe_bicep_position(current)
-        except Exception:
-            safe = self.safe_bicep_position_reached
+            safe = self.is_safe_bicep_position(current)
+        except Exception as exc:
+            self.log_message(f"Could not verify task start pose: {exc}")
+            safe = False
         if not safe:
             messagebox.showwarning("Safe reset required", "Move the arm to Safe Bicep Reset before starting this task flow.")
             return False

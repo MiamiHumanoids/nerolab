@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-full-activity-trace-25`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-verified-replay-start-26`.
 
 ## Core Principles
 
@@ -271,7 +271,7 @@ Legacy recordings without `joint_space: follower` are treated as leader-space re
 Important replay rules:
 
 - End the teach process immediately after saving and disconnect it. Never replay on the arm object that just left leader/drag-teach mode.
-- Let NERO Lab reconnect, run Safe Bicep Reset if requested, and launch Replay Task as a separate process.
+- Let NERO Lab reconnect, verify Safe Bicep from live encoders, and launch Replay Task as a separate process. A disconnected GUI must connect and require Safe Bicep rather than launching replay from an unknown physical pose.
 - Use a clean connection with `reset_on_connect=False`.
 - Do not immediately call `set_teach_mode(False)` on a fresh replay connection; that redundantly invokes follower/reset behavior.
 - Select J mode explicitly before replay.

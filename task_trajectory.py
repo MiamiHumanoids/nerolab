@@ -55,7 +55,10 @@ def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:
     move_js = getattr(robot._arm, "move_js", None)
     if move_js is None:
         raise RuntimeError("Installed pyAgxArm does not provide move_js for taught-task replay")
-    print(f"{label}: smooth move to first sample in {duration:.2f}s ({step_count} steps).")
+    print(
+        f"{label}: smooth move to first sample in {duration:.2f}s ({step_count} steps) "
+        f"start={start} target={target}."
+    )
     started = time.monotonic()
     for step_index in range(1, step_count + 1):
         progress = step_index / step_count
