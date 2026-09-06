@@ -1,0 +1,164 @@
+from lerobot_robot_nero import Nero
+from lerobot_robot_nero.config import NeroConfig
+
+
+def test_joint_key_mapping_and_action_conversion():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    action = {
+        "joint1.pos": 0.1,
+        "joint2.pos": 0.2,
+        "joint3.pos": 0.3,
+        "joint4.pos": 0.4,
+        "joint5.pos": 0.5,
+        "joint6.pos": 0.6,
+        "joint7.pos": 0.7,
+    }
+
+    target = robot._build_target(action)
+    assert len(target) == 7
+    assert target[0] == 0.1
+    assert target[-1] == 0.7
+
+
+def test_joint_normalization_handles_list_and_dict():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    values = robot._normalize_joint_angles([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    assert len(values) == 7
+    assert values[-1] == 0.6
+
+    payload = {"joint1": 1.0, "joint2": 2.0, "joint3": 3.0, "joint4": 4.0, "joint5": 5.0, "joint6": 6.0, "joint7": 7.0}
+    values = robot._normalize_joint_angles(payload)
+    assert values[0] == 1.0
+    assert values[6] == 7.0
+
+
+def test_teach_mode_helpers_expose_sdk_methods():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class DummyArm:
+        def __init__(self):
+            self.mode = "idle"
+
+        def is_connected(self):
+            return True
+
+        def set_leader_mode(self):
+            self.mode = "leader"
+
+        def set_follower_mode(self):
+            self.mode = "follower"
+
+        def set_normal_mode(self):
+            self.mode = "normal"
+
+        def get_leader_joint_angles(self):
+            return [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+
+    robot._arm = DummyArm()
+
+    robot.set_teach_mode(True)
+    assert robot._arm.mode == "leader"
+    assert robot.get_teach_joint_angles() == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+
+    robot.set_teach_mode(False)
+    assert robot._arm.mode == "normal"
+
+
+def test_get_joint_angles_wrapper_returns_underlying_arm_values():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class DummyArm:
+        def is_connected(self):
+            return True
+
+        def get_joint_angles(self):
+            return [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
+    robot._arm = DummyArm()
+
+    assert robot.get_joint_angles() == [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
+
+def test_robot_observation_and_action_keys_match_lerobot_schema():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    obs_features = robot.observation_features
+    action_features = robot.action_features
+
+    assert "observation.state" in obs_features
+    assert "observation.images.wrist" in obs_features
+    assert "action" in action_features
+
+    assert obs_features["observation.state"] == (7,)
+    assert obs_features["observation.images.wrist"] == (480, 640, 3)
+    assert action_features["action"] == (7,)
+
+
+def test_robot_can_advertise_overview_camera_feature():
+    cfg = NeroConfig(id="test-arm", can_channel="can0", has_overview_camera=True)
+    robot = Nero(cfg)
+
+    assert robot.observation_features["observation.images.overview"] == (480, 640, 3)
+
+
+def test_send_action_accepts_standard_lerobot_action_format():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class DummyArm:
+        def __init__(self):
+            self.target = None
+
+        def is_connected(self):
+            return True
+
+        def move_j(self, target):
+            self.target = list(target)
+
+    dummy = DummyArm()
+    robot._arm = dummy
+
+    result = robot.send_action({"action": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]})
+
+    assert result == {"action": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
+    assert dummy.target == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+
+
+def test_gripper_helper_methods_call_sdk_effectors():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class DummyEffector:
+        def __init__(self):
+            self.calls = []
+
+        def move_gripper_m(self, value=0.0, force=1.0):
+            self.calls.append((value, force))
+
+    class DummyArm:
+        def __init__(self):
+            self.effectors = {}
+
+        def is_connected(self):
+            return True
+
+        def init_effector(self, effector_type):
+            self.effectors[effector_type] = DummyEffector()
+            return self.effectors[effector_type]
+
+    dummy_arm = DummyArm()
+    robot._arm = dummy_arm
+
+    robot.close_gripper()
+    robot.open_gripper()
+
+    gripper = dummy_arm.effectors["agx_gripper"]
+    assert gripper.calls[0] == (0.0, 1.0)
+    assert gripper.calls[1] == (0.055, 1.0)

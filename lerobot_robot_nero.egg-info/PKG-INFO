@@ -1,0 +1,38 @@
+Metadata-Version: 2.4
+Name: lerobot_robot_nero
+Version: 0.1.0
+Summary: LeRobot hardware plugin for the Agilex NERO 7-DOF arm with gripper and Intel RealSense D405 camera over SocketCAN
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: lerobot
+Requires-Dist: pyAgxArm
+Requires-Dist: pyrealsense2
+
+# lerobot-nero
+
+LeRobot hardware plugin for the Agilex NERO 7-DOF arm with an Agilex Piper-style gripper and an Intel RealSense D405 camera mounted on the wrist/gripper assembly, exposed through the `pyAgxArm` SDK over SocketCAN.
+
+## Install
+
+```bash
+python3 -m pip install -e .
+```
+
+## Verify the plugin
+
+```bash
+python3 -c "from lerobot_robot_nero import NeroConfig; print(NeroConfig(id='demo', can_channel='can0', bitrate=1000000, firmware_version='v121').type)"
+```
+
+## Connect via SocketCAN
+
+```bash
+sudo ip link set can0 up type can bitrate 1000000
+lerobot-nero --channel can0 --bitrate 1000000 --firmware-version v121
+```
+
+## Quick hardware check
+
+```bash
+lerobot-nero --channel can0 --check-can
+```

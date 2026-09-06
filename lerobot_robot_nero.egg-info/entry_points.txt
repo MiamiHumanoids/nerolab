@@ -1,0 +1,2 @@
+[console_scripts]
+lerobot-nero = lerobot_robot_nero.cli:main

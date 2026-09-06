@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_robot_nero"
+version = "0.1.0"
+description = "LeRobot hardware plugin for the Agilex NERO 7-DOF arm with gripper and Intel RealSense D405 camera over SocketCAN"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "lerobot",
+  "pyAgxArm",
+  "pyrealsense2",
+]
+
+[project.scripts]
+lerobot-nero = "lerobot_robot_nero.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["lerobot_robot_nero*"]
