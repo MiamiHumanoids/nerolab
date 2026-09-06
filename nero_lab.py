@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-copy-activity-14"
+APP_BUILD = "2026-09-06-global-copy-16"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -30,6 +30,7 @@ RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
 RESET_SEGMENT_MAX_DELTA = 0.14
 RESET_BLEND_DISTANCE = 0.04
+RESET_LIMIT_MARGIN = 0.005
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
     (-1.74533, 1.74533),
@@ -231,12 +232,16 @@ class NeroLab(tk.Tk):
 
         log_frame = ttk.LabelFrame(right, text="Activity", padding=8)
         log_frame.pack(fill="both", expand=True, pady=(14, 0))
-        log_actions = ttk.Frame(log_frame)
-        log_actions.pack(fill="x", pady=(0, 6))
-        ttk.Button(log_actions, text="Copy Activity", command=self.copy_activity_log).pack(side="right")
         self.log = tk.Text(log_frame, wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True)
-        ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=5).pack(fill="x", side="bottom")
+        footer = ttk.Frame(self, relief="sunken", padding=5)
+        footer.pack(fill="x", side="bottom")
+        ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            footer,
+            text="Copy Activity Trace to Clipboard",
+            command=self.copy_activity_log,
+        ).pack(side="right", padx=(8, 0))
 
         self._build_inference_tab(inference_tab)
 
@@ -247,7 +252,6 @@ class NeroLab(tk.Tk):
         ttk.Button(connection, text="Disconnect", command=self.disconnect_robot).pack(side="left", padx=8)
         ttk.Button(connection, text="Read joint angles", command=self.read_joint_angles).pack(side="left")
         ttk.Button(connection, text="Check arm status", command=self.check_arm_status).pack(side="left", padx=8)
-        ttk.Button(connection, text="Copy Activity", command=self.copy_activity_log).pack(side="left")
         ttk.Button(connection, text="Re-enable Arm", command=self.reenable_arm).pack(side="left", padx=8)
         ttk.Button(connection, text="Upright Reset", command=self.upright_reset).pack(side="right")
         self.arm_status_label = ttk.Label(parent, textvariable=self.arm_status_var, foreground="#555555")
@@ -537,9 +541,13 @@ class NeroLab(tk.Tk):
         )
         for segment_index in range(1, segment_count + 1):
             fraction = segment_index / segment_count
-            waypoint = [
+            raw_waypoint = [
                 value + (goal - value) * fraction
                 for value, goal in zip(start, target)
+            ]
+            waypoint = [
+                min(max(value, lower + RESET_LIMIT_MARGIN), upper - RESET_LIMIT_MARGIN)
+                for value, (lower, upper) in zip(raw_waypoint, COMMAND_JOINT_LIMITS)
             ]
             move_result = robot._arm.move_j(waypoint)
             self.log_message(
@@ -587,7 +595,10 @@ class NeroLab(tk.Tk):
                 status = robot.get_arm_status()
                 message = getattr(status, "msg", status)
                 arm_status = str(getattr(message, "arm_status", ""))
-                if "EMERGENCY_STOP" not in arm_status and "BRAKE_NOT_RELEASED" not in arm_status:
+                controller_ready = any(
+                    state in arm_status for state in ("NORMAL", "NO_SOLUTION", "SINGULARITY")
+                )
+                if controller_ready:
                     break
                 time.sleep(0.05)
             else:
