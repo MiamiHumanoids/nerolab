@@ -22,6 +22,7 @@ COMMAND_JOINT_LIMITS = [
 STREAM_INTERVAL_S = 0.01
 STREAM_SPEED_RAD_S = 0.4
 GRIPPER_OPEN_WIDTH_M = 0.1
+GRIPPER_REPLAY_FORCE = 30.0
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
 
@@ -104,7 +105,7 @@ def command_recorded_gripper(
             raise RuntimeError("Recorded angle-mode gripper motion requires move_gripper_deg")
     else:
         move = effector.move_gripper_m
-    move(value=value, force=1.0)
+    move(value=value, force=GRIPPER_REPLAY_FORCE)
     print(f"Gripper replay sample: mode={mode} value={value:.6f}")
     return mode, value
 

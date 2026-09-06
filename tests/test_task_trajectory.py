@@ -185,8 +185,8 @@ class TaskTrajectoryTest(unittest.TestCase):
         )
 
         self.assertEqual(effector.calls, [
-            ("angle", 17.5, 1.0),
-            ("width", 0.04, 1.0),
+            ("angle", 17.5, 30.0),
+            ("width", 0.04, 30.0),
         ])
 
     def test_safe_shutdown_moves_brakes_then_disconnects(self):

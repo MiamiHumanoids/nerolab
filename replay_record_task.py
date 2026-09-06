@@ -14,7 +14,12 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
-from task_trajectory import prepare_replay_samples, safe_bicep_shutdown, smooth_move_with_recovery
+from task_trajectory import (
+    GRIPPER_REPLAY_FORCE,
+    prepare_replay_samples,
+    safe_bicep_shutdown,
+    smooth_move_with_recovery,
+)
 
 REPLAY_SPEED_PERCENT = 25
 
@@ -102,7 +107,7 @@ def main(task_file: Path, dataset_root: Path) -> None:
             target = [float(value) for value in sample["joints"]]
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
-                effector.move_gripper_m(value=gripper, force=30.0)
+                effector.move_gripper_m(value=gripper, force=GRIPPER_REPLAY_FORCE)
                 previous_gripper = gripper
             robot._arm.move_js(target)
             obs = robot.get_observation()
