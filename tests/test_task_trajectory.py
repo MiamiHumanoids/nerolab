@@ -189,7 +189,7 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("width", 0.04, 30.0),
         ])
 
-    def test_amplified_gripper_increases_width_mode_closure(self):
+    def test_amplified_gripper_is_binary_with_delayed_opening(self):
         class Effector:
             def __init__(self):
                 self.calls = []
@@ -199,7 +199,7 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         effector = Effector()
         previous = None
-        for value in (0.1, 0.08, 0.06):
+        for value in (0.1, 0.08, 0.09, 0.097, 0.099):
             previous = command_recorded_gripper(
                 effector,
                 {"gripper_mode": "width", "gripper": value},
@@ -207,9 +207,11 @@ class TaskTrajectoryTest(unittest.TestCase):
                 amplified=True,
             )
 
-        self.assertEqual(effector.calls[0], (0.1, 30.0))
-        self.assertAlmostEqual(effector.calls[1][0], 0.04)
-        self.assertEqual(effector.calls[2], (0.0, 30.0))
+        self.assertEqual(effector.calls, [
+            (0.1, 30.0),
+            (0.0, 30.0),
+            (0.1, 30.0),
+        ])
 
     def test_safe_shutdown_moves_brakes_then_disconnects(self):
         events = []

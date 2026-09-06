@@ -26,7 +26,7 @@ from task_trajectory import (
     prepare_replay_samples,
 )
 
-APP_BUILD = "2026-09-06-amplified-gripper-45"
+APP_BUILD = "2026-09-06-binary-gripper-46"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -242,7 +242,7 @@ class NeroLab(tk.Tk):
         ttk.Button(task_flow, text="Record Dataset with Selected Trained Task", command=self.replay_trained_task).grid(row=0, column=1)
         ttk.Checkbutton(
             task_flow,
-            text="Amplified gripper force and tightness",
+            text="Amplify gripper during replay",
             variable=self.amplified_gripper_var,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Label(task_flow, text="Teach manually, reset to Safe Bicep, then replay to capture training data.", foreground="#555555").grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))

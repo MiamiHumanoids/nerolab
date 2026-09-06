@@ -15,10 +15,9 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
-    GRIPPER_CLOSURE_AMPLIFICATION,
-    GRIPPER_OPEN_WIDTH_M,
     GRIPPER_REPLAY_FORCE,
     prepare_replay_samples,
+    replay_gripper_target,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
 )
@@ -98,7 +97,7 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
 
     stop_requested = False
     try:
-        previous_gripper = None
+        previous_gripper: tuple[str, float] | None = None
         smooth_move_with_recovery(
             robot,
             [float(value) for value in samples[0]["joints"]],
@@ -107,16 +106,13 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
         replay_started = time.monotonic()
         for index, sample in enumerate(samples):
             target = [float(value) for value in sample["joints"]]
-            gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
-            if amplified_gripper and str(sample.get("gripper_mode", "width")) == "width":
-                gripper = max(
-                    0.0,
-                    GRIPPER_OPEN_WIDTH_M
-                    - (GRIPPER_OPEN_WIDTH_M - gripper) * GRIPPER_CLOSURE_AMPLIFICATION,
-                )
-            if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
+            mode, gripper = replay_gripper_target(
+                sample, previous_gripper, amplified_gripper
+            )
+            gripper = float(np.clip(gripper, 0.0, 0.1))
+            if previous_gripper is None or abs(gripper - previous_gripper[1]) > 0.002:
                 effector.move_gripper_m(value=gripper, force=GRIPPER_REPLAY_FORCE)
-                previous_gripper = gripper
+                previous_gripper = (mode, gripper)
             robot._arm.move_js(target)
             obs = robot.get_observation()
             state = np.asarray(obs["observation.state"], dtype=np.float32)
