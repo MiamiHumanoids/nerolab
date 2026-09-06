@@ -15,6 +15,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
+    GRIPPER_CLOSURE_AMPLIFICATION,
+    GRIPPER_OPEN_WIDTH_M,
     GRIPPER_REPLAY_FORCE,
     prepare_replay_samples,
     safe_bicep_shutdown,
@@ -46,7 +48,7 @@ def rgb_image(value: object, label: str) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if image.shape[-1] == 3 else image
 
 
-def main(task_file: Path, dataset_root: Path) -> None:
+def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -> None:
     recording = json.loads(task_file.read_text())
     samples = prepare_replay_samples(recording)
     task = str(recording.get("task", task_file.stem))
@@ -106,6 +108,12 @@ def main(task_file: Path, dataset_root: Path) -> None:
         for index, sample in enumerate(samples):
             target = [float(value) for value in sample["joints"]]
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
+            if amplified_gripper and str(sample.get("gripper_mode", "width")) == "width":
+                gripper = max(
+                    0.0,
+                    GRIPPER_OPEN_WIDTH_M
+                    - (GRIPPER_OPEN_WIDTH_M - gripper) * GRIPPER_CLOSURE_AMPLIFICATION,
+                )
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
                 effector.move_gripper_m(value=gripper, force=GRIPPER_REPLAY_FORCE)
                 previous_gripper = gripper
@@ -148,5 +156,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay a taught NERO task and record cameras and joint data.")
     parser.add_argument("--task-file", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--amplified-gripper", action="store_true")
     args = parser.parse_args()
-    main(args.task_file, args.dataset_root)
+    main(
+        args.task_file,
+        args.dataset_root,
+        amplified_gripper=args.amplified_gripper,
+    )

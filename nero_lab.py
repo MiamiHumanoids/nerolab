@@ -26,7 +26,7 @@ from task_trajectory import (
     prepare_replay_samples,
 )
 
-APP_BUILD = "2026-09-06-gripper-force-44"
+APP_BUILD = "2026-09-06-amplified-gripper-45"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -150,6 +150,7 @@ class NeroLab(tk.Tk):
         self.workers_var = tk.StringVar(value="2")
         self.compile_model_var = tk.BooleanVar(value=False)
         self.fast_motion_var = tk.BooleanVar(value=False)
+        self.amplified_gripper_var = tk.BooleanVar(value=True)
         self.device_var = tk.StringVar(value="auto")
         self.arm_status_var = tk.StringVar(value="Arm status: not connected")
         self.arm_status_label: ttk.Label | None = None
@@ -239,7 +240,12 @@ class NeroLab(tk.Tk):
         task_flow.pack(fill="x", pady=(14, 0))
         ttk.Button(task_flow, text="Teach Task", command=self.teach_task).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(task_flow, text="Record Dataset with Selected Trained Task", command=self.replay_trained_task).grid(row=0, column=1)
-        ttk.Label(task_flow, text="Teach manually, reset to Safe Bicep, then replay to capture training data.", foreground="#555555").grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            task_flow,
+            text="Amplified gripper force and tightness",
+            variable=self.amplified_gripper_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(task_flow, text="Teach manually, reset to Safe Bicep, then replay to capture training data.", foreground="#555555").grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         review = ttk.LabelFrame(right, text="Review", padding=12)
         review.pack(fill="x", pady=(14, 0))
@@ -1147,8 +1153,11 @@ class NeroLab(tk.Tk):
         if not self._prepare_task_process(emergency_brake=False):
             return
         dataset_root = DATASET_BASE / f"nero_replayed__{self._task_slug(task)}"
+        command = [sys.executable, str(TASK_REPLAY_RECORDER), "--task-file", str(task_file), "--dataset-root", str(dataset_root)]
+        if self.amplified_gripper_var.get():
+            command.append("--amplified-gripper")
         self.start_process(
-            [sys.executable, str(TASK_REPLAY_RECORDER), "--task-file", str(task_file), "--dataset-root", str(dataset_root)],
+            command,
             "Replay trained task",
         )
 
@@ -1165,8 +1174,11 @@ class NeroLab(tk.Tk):
         self.clear_activity_log()
         if not self._prepare_task_process(emergency_brake=False):
             return
+        command = [sys.executable, str(TASK_REPLAYER), "--task-file", str(task_file)]
+        if self.amplified_gripper_var.get():
+            command.append("--amplified-gripper")
         self.start_process(
-            [sys.executable, str(TASK_REPLAYER), "--task-file", str(task_file)],
+            command,
             "Replay task",
         )
 

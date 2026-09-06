@@ -23,6 +23,7 @@ STREAM_INTERVAL_S = 0.01
 STREAM_SPEED_RAD_S = 0.4
 GRIPPER_OPEN_WIDTH_M = 0.1
 GRIPPER_REPLAY_FORCE = 30.0
+GRIPPER_CLOSURE_AMPLIFICATION = 3.0
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
 
@@ -93,9 +94,16 @@ def command_recorded_gripper(
     effector: Any,
     sample: dict[str, Any],
     previous: tuple[str, float] | None,
+    amplified: bool = False,
 ) -> tuple[str, float]:
     mode = str(sample.get("gripper_mode", "width"))
     value = float(sample.get("gripper", 0.1))
+    if amplified and mode == "width":
+        value = max(
+            0.0,
+            GRIPPER_OPEN_WIDTH_M
+            - (GRIPPER_OPEN_WIDTH_M - value) * GRIPPER_CLOSURE_AMPLIFICATION,
+        )
     threshold = 0.5 if mode == "angle" else 0.0005
     if previous is not None and mode == previous[0] and abs(value - previous[1]) <= threshold:
         return previous
@@ -106,7 +114,10 @@ def command_recorded_gripper(
     else:
         move = effector.move_gripper_m
     move(value=value, force=GRIPPER_REPLAY_FORCE)
-    print(f"Gripper replay sample: mode={mode} value={value:.6f}")
+    print(
+        f"Gripper replay sample: mode={mode} value={value:.6f} "
+        f"force={GRIPPER_REPLAY_FORCE:.1f} amplified={amplified}"
+    )
     return mode, value
 
 

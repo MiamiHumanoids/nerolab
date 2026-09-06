@@ -32,7 +32,7 @@ def arm_status_text(robot: Nero) -> str:
     )
 
 
-def main(task_file: Path) -> None:
+def main(task_file: Path, amplified_gripper: bool = False) -> None:
     recording = json.loads(task_file.read_text())
     samples = prepare_replay_samples(recording)
 
@@ -82,7 +82,9 @@ def main(task_file: Path) -> None:
         print(f"Recorded trajectory speed set to {TRAJECTORY_SPEED_PERCENT}%.")
         def apply_sample(sample: dict[str, object], index: int) -> None:
             nonlocal previous_gripper
-            previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
+            previous_gripper = command_recorded_gripper(
+                effector, sample, previous_gripper, amplified=amplified_gripper
+            )
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")
         stream_recorded_trajectory(robot, samples, apply_sample)
@@ -101,5 +103,6 @@ def main(task_file: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay a taught NERO task without recording data.")
     parser.add_argument("--task-file", type=Path, required=True)
+    parser.add_argument("--amplified-gripper", action="store_true")
     args = parser.parse_args()
-    main(args.task_file)
+    main(args.task_file, amplified_gripper=args.amplified_gripper)
