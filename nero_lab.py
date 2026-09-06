@@ -20,14 +20,14 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-joint-control-9"
+APP_BUILD = "2026-09-06-hybrid-joint-control-10"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
-RESET_WAYPOINT_MAX_DELTA = 0.20
+RESET_WAYPOINT_MAX_DELTA = 0.02
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
     (-1.74533, 1.74533),
@@ -484,10 +484,21 @@ class NeroLab(tk.Tk):
                 value + (goal - value) * fraction
                 for value, goal in zip(start, target)
             ]
-            move_result = robot._arm.move_j(waypoint)
+            status = robot.get_arm_status()
+            message = getattr(status, "msg", status)
+            arm_status = str(getattr(message, "arm_status", ""))
+            use_direct_stream = "NO_SOLUTION" in arm_status or "SINGULARITY" in arm_status
+            motion_api = "move_js" if use_direct_stream else "move_j"
+            motion_command = getattr(robot._arm, motion_api, None)
+            if motion_command is None:
+                raise RuntimeError(
+                    f"Installed pyAgxArm does not provide {motion_api} required for {label}"
+                )
+            move_result = motion_command(waypoint)
             self.log_message(
                 f"COMMAND {label} waypoint {waypoint_index}/{waypoint_count} "
-                f"move_j={move_result!r} target={[round(value, 6) for value in waypoint]}"
+                f"api={motion_api} result={move_result!r} "
+                f"target={[round(value, 6) for value in waypoint]}"
             )
             self.wait_for_joint_target(
                 robot,
