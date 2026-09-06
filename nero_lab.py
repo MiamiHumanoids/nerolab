@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-control-debug-3"
+APP_BUILD = "2026-09-06-control-debug-4"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -100,6 +100,8 @@ class NeroLab(tk.Tk):
         self.robot: Nero | None = None
         self.safe_bicep_position_reached = False
         self.slider_motion_job: str | None = None
+        self.pending_slider_joint: int | None = None
+        self.pending_slider_value: float | None = None
         self.suppress_slider_motion = False
         self.joint_vars = [tk.DoubleVar(value=0.0) for _ in range(7)]
         self.gripper_var = tk.DoubleVar(value=0.1)
@@ -432,7 +434,9 @@ class NeroLab(tk.Tk):
             status = robot.get_arm_status()
             message = getattr(status, "msg", status)
             arm_status = str(getattr(message, "arm_status", ""))
-            if "NORMAL" in arm_status:
+            mode_feedback = str(getattr(message, "mode_feedback", ""))
+            enabled = robot._arm.get_joints_enable_status_list()
+            if "NORMAL" in arm_status and "MOVE_P" in mode_feedback and all(enabled):
                 self.log_arm_debug(f"{label} P prime reached normal control")
                 break
             time.sleep(0.05)
@@ -441,15 +445,21 @@ class NeroLab(tk.Tk):
         mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
         self.log_message(f"COMMAND {label} switch mode_j returned {mode_result!r}")
 
-    def controller_has_kinematic_fault(self, robot: Nero) -> bool:
+    def controller_requires_prime(self, robot: Nero) -> bool:
         status = robot.get_arm_status()
         message = getattr(status, "msg", status)
         arm_status = str(getattr(message, "arm_status", ""))
-        return "SINGULARITY" in arm_status or "NO_SOLUTION" in arm_status
+        motion_status = str(getattr(message, "motion_status", ""))
+        return (
+            "SINGULARITY" in arm_status
+            or "NO_SOLUTION" in arm_status
+            or "BRAKE_NOT_RELEASED" in arm_status
+            or "FAILED" in motion_status
+        )
 
     def prepare_reset_motion(self, robot: Nero, label: str) -> None:
-        if self.controller_has_kinematic_fault(robot):
-            self.log_message(f"DEBUG {label} detected kinematic fault; recovering and priming P control")
+        if self.controller_requires_prime(robot):
+            self.log_message(f"DEBUG {label} detected controller fault or failed motion; recovering and priming P control")
             robot.set_teach_mode(False)
             self.log_arm_debug(f"{label} after controller recovery")
             self.prime_position_control(robot, label)
@@ -492,6 +502,8 @@ class NeroLab(tk.Tk):
         robot = self.require_robot()
         if robot is None or not self.joint_enable_vars[joint - 1].get():
             return
+        self.pending_slider_joint = joint
+        self.pending_slider_value = float(self.joint_vars[joint - 1].get())
         if self.slider_motion_job is not None:
             self.after_cancel(self.slider_motion_job)
         self.slider_motion_job = self.after(SLIDER_DEBOUNCE_MS, self._send_slider_motion)
@@ -502,17 +514,24 @@ class NeroLab(tk.Tk):
         if robot is None:
             return
         try:
-            limits = [(-2.705261, 2.705261), (-1.74533, 1.74533), (-2.757621, 2.757621), (-1.012291, 2.146755), (-2.757621, 2.757621), (-0.733039, 0.959932), (-1.570797, 1.570797)]
-            targets = [max(lower, min(upper, variable.get())) for variable, (lower, upper) in zip(self.joint_vars, limits)]
-            self.safe_bicep_position_reached = False
-            self.log_arm_debug(f"slider before move_j target={targets}")
-            if self.controller_has_kinematic_fault(robot):
-                self.set_joint_slider_values(robot.get_joint_angles())
-                self.log_message("COMMAND slider blocked: controller has a kinematic fault; use Upright Reset or Safe Bicep Reset first")
+            joint = self.pending_slider_joint
+            desired = self.pending_slider_value
+            if joint is None or desired is None:
                 return
+            self.safe_bicep_position_reached = False
+            self.log_arm_debug(f"slider joint={joint} requested={desired}")
+            if self.controller_requires_prime(robot):
+                self.log_message("DEBUG slider detected controller fault or failed motion; running P-to-J control prime")
+                self.prime_position_control(robot, "slider")
+            targets = [float(value) for value in robot.get_joint_angles()]
+            targets[joint - 1] = desired
+            self.set_joint_slider_values(targets)
             mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
             move_result = robot._arm.move_j(targets)
-            self.log_message(f"COMMAND slider mode_j={mode_result!r} move_j={move_result!r} target={targets}")
+            self.log_message(
+                f"COMMAND slider joint={joint} requested={desired} mode_j={mode_result!r} "
+                f"move_j={move_result!r} full_target={targets}"
+            )
             self.after(300, lambda: self.log_arm_debug("slider 300ms after move_j"))
         except Exception as exc:
             self.log_message(f"COMMAND slider failed: {exc}")
@@ -522,6 +541,8 @@ class NeroLab(tk.Tk):
         if self.slider_motion_job is not None:
             self.after_cancel(self.slider_motion_job)
             self.slider_motion_job = None
+        self.pending_slider_joint = None
+        self.pending_slider_value = None
 
     def set_joint_slider_values(self, values: list[float]) -> None:
         self.suppress_slider_motion = True
