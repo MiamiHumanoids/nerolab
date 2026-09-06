@@ -22,6 +22,7 @@ from lerobot_robot_nero import Nero, NeroConfig
 
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
+CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
 UPRIGHT_RESET_JOINTS = [0.0, -0.2, 0.0, 0.4, 0.0, 0.2, 0.0]
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
@@ -315,6 +316,7 @@ class NeroLab(tk.Tk):
         else:
             self.set_arm_status_display("Arm status: connected")
         self.log_message("Arm connected")
+        self.log_arm_debug("connect complete")
 
     def disconnect_robot(self, emergency_brake: bool = True) -> None:
         self.cancel_slider_motion()
@@ -385,7 +387,54 @@ class NeroLab(tk.Tk):
     def set_arm_speed(self) -> None:
         robot = self.require_robot()
         if robot is not None:
-            robot._arm.set_speed_percent(int(self.speed_var.get()))
+            speed = int(self.speed_var.get())
+            result = robot._arm.set_speed_percent(speed)
+            self.log_message(f"COMMAND set_speed_percent({speed}) returned {result!r}")
+
+    def arm_debug_text(self, robot: Nero) -> str:
+        status = robot.get_arm_status()
+        message = getattr(status, "msg", status)
+        fields = " ".join(
+            f"{name}={getattr(message, name, '?')}"
+            for name in ("ctrl_mode", "arm_status", "mode_feedback", "teach_status", "motion_status", "trajectory_num")
+        )
+        try:
+            joints = [round(float(value), 6) for value in robot.get_joint_angles()]
+        except Exception as exc:
+            joints = f"ERROR: {exc}"
+        try:
+            enabled = robot._arm.get_joints_enable_status_list()
+        except Exception as exc:
+            enabled = f"ERROR: {exc}"
+        return f"{fields} enabled={enabled} joints={joints}"
+
+    def log_arm_debug(self, label: str) -> None:
+        robot = self.robot
+        if robot is None or not robot.is_connected:
+            self.log_message(f"DEBUG {label}: arm not connected")
+            return
+        try:
+            self.log_message(f"DEBUG {label}: {self.arm_debug_text(robot)}")
+        except Exception as exc:
+            self.log_message(f"DEBUG {label}: status read failed: {exc}")
+
+    def prime_position_control(self, robot: Nero, label: str) -> None:
+        mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
+        move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
+        self.log_message(
+            f"COMMAND {label} prime mode_p={mode_result!r} move_p={move_result!r} "
+            f"target={CONTROL_PRIME_POSE}"
+        )
+        time.sleep(0.5)
+        self.log_arm_debug(f"{label} 500ms after P prime")
+        mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
+        self.log_message(f"COMMAND {label} switch mode_j returned {mode_result!r}")
+
+    def controller_requires_prime(self, robot: Nero) -> bool:
+        status = robot.get_arm_status()
+        message = getattr(status, "msg", status)
+        arm_status = str(getattr(message, "arm_status", ""))
+        return "SINGULARITY" in arm_status or "NO_SOLUTION" in arm_status
 
     def emergency_brake(self) -> None:
         robot = self.require_robot()
@@ -405,11 +454,13 @@ class NeroLab(tk.Tk):
             return
         self.safe_bicep_position_reached = False
         try:
+            self.log_arm_debug("Re-enable before recovery")
             robot.set_teach_mode(False)
-            robot._arm.set_speed_percent(100)
+            speed_result = robot._arm.set_speed_percent(100)
             self.speed_var.set(100.0)
             self.set_arm_status_display("Arm status: re-enabled")
-            self.log_message("Arm re-enabled: all joints enabled, J mode, speed 100%")
+            self.log_message(f"COMMAND set_speed_percent(100) returned {speed_result!r}")
+            self.log_arm_debug("Re-enable after recovery")
         except Exception as exc:
             self.set_arm_status_display(f"Re-enable error: {exc}")
             self.log_message(f"Arm re-enable failed: {exc}")
@@ -429,11 +480,21 @@ class NeroLab(tk.Tk):
         robot = self.require_robot()
         if robot is None:
             return
-        robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-        limits = [(-2.705261, 2.705261), (-1.74533, 1.74533), (-2.757621, 2.757621), (-1.012291, 2.146755), (-2.757621, 2.757621), (-0.733039, 0.959932), (-1.570797, 1.570797)]
-        targets = [max(lower, min(upper, variable.get())) for variable, (lower, upper) in zip(self.joint_vars, limits)]
-        self.safe_bicep_position_reached = False
-        robot._arm.move_j(targets)
+        try:
+            limits = [(-2.705261, 2.705261), (-1.74533, 1.74533), (-2.757621, 2.757621), (-1.012291, 2.146755), (-2.757621, 2.757621), (-0.733039, 0.959932), (-1.570797, 1.570797)]
+            targets = [max(lower, min(upper, variable.get())) for variable, (lower, upper) in zip(self.joint_vars, limits)]
+            self.safe_bicep_position_reached = False
+            self.log_arm_debug(f"slider before move_j target={targets}")
+            if self.controller_requires_prime(robot):
+                self.log_message("DEBUG slider detected kinematic fault; running P-to-J control prime")
+                self.prime_position_control(robot, "slider")
+            mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
+            move_result = robot._arm.move_j(targets)
+            self.log_message(f"COMMAND slider mode_j={mode_result!r} move_j={move_result!r} target={targets}")
+            self.after(300, lambda: self.log_arm_debug("slider 300ms after move_j"))
+        except Exception as exc:
+            self.log_message(f"COMMAND slider failed: {exc}")
+            self.log_arm_debug("slider failure")
 
     def cancel_slider_motion(self) -> None:
         if self.slider_motion_job is not None:
@@ -451,8 +512,13 @@ class NeroLab(tk.Tk):
     def slider_gripper(self) -> None:
         robot = self.require_robot()
         if robot is not None:
-            effector = robot._get_gripper_effector()
-            effector.move_gripper_m(value=self.gripper_var.get(), force=30.0)
+            width = self.gripper_var.get()
+            try:
+                effector = robot._get_gripper_effector()
+                result = effector.move_gripper_m(value=width, force=30.0)
+                self.log_message(f"COMMAND gripper width={width:.3f} returned {result!r}")
+            except Exception as exc:
+                self.log_message(f"COMMAND gripper width={width:.3f} failed: {exc}")
 
     def toggle_joint(self, joint: int, enabled: bool) -> None:
         robot = self.require_robot()
@@ -460,7 +526,12 @@ class NeroLab(tk.Tk):
             return
         self.joint_enable_vars[joint - 1].set(enabled)
         self.joint_disable_vars[joint - 1].set(not enabled)
-        (robot._arm.enable if enabled else robot._arm.disable)(joint)
+        try:
+            result = (robot._arm.enable if enabled else robot._arm.disable)(joint)
+            self.log_message(f"COMMAND joint {joint} {'enable' if enabled else 'disable'} returned {result!r}")
+            self.log_arm_debug(f"joint {joint} {'enable' if enabled else 'disable'} complete")
+        except Exception as exc:
+            self.log_message(f"COMMAND joint {joint} {'enable' if enabled else 'disable'} failed: {exc}")
 
     def read_joint_angles(self) -> None:
         robot = self.require_robot()
@@ -490,11 +561,18 @@ class NeroLab(tk.Tk):
         self.cancel_slider_motion()
         self.safe_bicep_position_reached = False
         try:
+            self.log_arm_debug(f"Upright Reset before recovery target={UPRIGHT_RESET_JOINTS}")
             robot.set_teach_mode(False)
-            robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-            robot._arm.move_j(UPRIGHT_RESET_JOINTS)
+            self.log_arm_debug("Upright Reset after recovery")
+            speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
+            self.prime_position_control(robot, "Upright Reset")
+            move_result = robot._arm.move_j(UPRIGHT_RESET_JOINTS)
+            self.log_message(
+                f"COMMAND Upright Reset speed={speed_result!r} move_j={move_result!r} "
+                f"target={UPRIGHT_RESET_JOINTS}"
+            )
             self.wait_for_joint_target(robot, UPRIGHT_RESET_JOINTS, "upright joint reset")
+            self.log_arm_debug("Upright Reset target reached")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
             robot._arm.set_speed_percent(100)
         except Exception as exc:
@@ -509,11 +587,16 @@ class NeroLab(tk.Tk):
         self.log_message(f"Upright Reset reached: joints {UPRIGHT_RESET_JOINTS}; gripper 0.1 m")
 
     def wait_for_joint_target(self, robot: Nero, target: list[float], label: str, timeout: float = 8.0) -> None:
+        start = time.monotonic()
         deadline = time.monotonic() + timeout
+        early_snapshot_logged = False
         while time.monotonic() < deadline:
             current = robot.get_joint_angles()
             if all(abs(float(value) - goal) <= 0.01 for value, goal in zip(current, target)):
                 return
+            if not early_snapshot_logged and time.monotonic() - start >= 0.25:
+                self.log_arm_debug(f"{label} 250ms after move_j")
+                early_snapshot_logged = True
             time.sleep(0.02)
         raise RuntimeError(
             f"{label} did not reach target {target}; current joints={robot.get_joint_angles()}; "
@@ -526,11 +609,18 @@ class NeroLab(tk.Tk):
             return
         self.cancel_slider_motion()
         try:
+            self.log_arm_debug(f"Safe Bicep before recovery target={SAFE_BICEP_RESET_JOINTS}")
             robot.set_teach_mode(False)
-            robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-            robot._arm.move_j(SAFE_BICEP_RESET_JOINTS)
+            self.log_arm_debug("Safe Bicep after recovery")
+            speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
+            self.prime_position_control(robot, "Safe Bicep")
+            move_result = robot._arm.move_j(SAFE_BICEP_RESET_JOINTS)
+            self.log_message(
+                f"COMMAND Safe Bicep speed={speed_result!r} move_j={move_result!r} "
+                f"target={SAFE_BICEP_RESET_JOINTS}"
+            )
             self.wait_for_joint_target(robot, SAFE_BICEP_RESET_JOINTS, "Safe Bicep Reset")
+            self.log_arm_debug("Safe Bicep target reached")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
             robot._arm.set_speed_percent(100)
         except Exception as exc:
