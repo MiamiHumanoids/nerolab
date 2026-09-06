@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import prepare_replay_samples
 
-APP_BUILD = "2026-09-06-faithful-replay-29"
+APP_BUILD = "2026-09-06-safe-teach-shutdown-32"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -366,11 +366,12 @@ class NeroLab(tk.Tk):
                 return
             if emergency_brake:
                 try:
-                    self.robot._arm.electronic_emergency_stop()
-                    self.log_message("Emergency brake activated before disconnect")
+                    self.robot.engage_brakes()
+                    self.log_message("All joint brakes verified before disconnect")
                 except Exception as exc:
                     self.log_message(f"Emergency brake before disconnect failed: {exc}")
-            self.robot.disconnect(disable_arm=disable_arm)
+                    return
+            self.robot.disconnect(disable_arm=disable_arm and not emergency_brake)
             self.robot = None
         self.arm_status_var.set("Arm status: not connected")
         self.log_message("Arm disconnected")
@@ -622,9 +623,9 @@ class NeroLab(tk.Tk):
         if robot is None:
             return
         try:
-            robot._arm.electronic_emergency_stop()
+            robot.engage_brakes()
             self.set_arm_status_display("Arm status: EMERGENCY STOP | Click Re-enable Arm to release motor brakes", color="#008000")
-            self.log_message("Emergency brake activated")
+            self.log_message("Emergency brake activated; all joint brakes verified")
         except Exception as exc:
             self.set_arm_status_display(f"Emergency brake error: {exc}")
             self.log_message(f"Emergency brake failed: {exc}")

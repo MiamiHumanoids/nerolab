@@ -13,7 +13,7 @@ import numpy as np
 
 from lerobot_robot_nero import Nero, NeroConfig
 from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
-from task_trajectory import convert_leader_samples
+from task_trajectory import SAFE_BICEP_JOINTS, convert_leader_samples, smooth_move_to_target
 
 FPS = 15
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
@@ -21,7 +21,7 @@ DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
 
 def read_gripper_state(
     effector, fallback: tuple[str, float] = ("width", 0.1)
-) -> tuple[str, float]:
+) -> tuple[tuple[str, float], float]:
     try:
         status = effector.get_gripper_status()
         message = getattr(status, "msg", status)
@@ -29,11 +29,58 @@ def read_gripper_state(
         if value is not None:
             mode = str(getattr(message, "mode", "width"))
             if mode == "width":
-                return mode, float(np.clip(float(value), 0.0, 0.1))
-            return mode, float(value)
+                value = float(np.clip(float(value), 0.0, 0.1))
+            return (mode, float(value)), float(getattr(status, "timestamp", 0.0))
     except Exception:
         pass
-    return fallback
+    return fallback, 0.0
+
+
+def enable_can_feedback_push(arm) -> None:
+    mode = arm._msg_mode
+    previous_push = mode.enable_can_push
+    previous_move_mode = mode.move_mode
+    try:
+        mode.enable_can_push = mode.Enums.CanActiveMsgReporting.ENABLE
+        mode.move_mode = 255
+        arm._set_mode()
+    finally:
+        mode.enable_can_push = previous_push
+        mode.move_mode = previous_move_mode
+
+
+def wait_for_fresh_gripper_feedback(
+    effector, previous_timestamp: float, timeout: float = 2.0
+) -> tuple[str, float]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state, timestamp = read_gripper_state(effector)
+        if timestamp > previous_timestamp:
+            status = effector.get_gripper_status()
+            print(
+                f"Physical gripper feedback active: timestamp={timestamp:.6f} "
+                f"hz={float(getattr(status, 'hz', 0.0)):.1f}",
+                flush=True,
+            )
+            return state
+        time.sleep(0.01)
+    raise RuntimeError(
+        "No fresh physical gripper feedback after entering Teach mode; "
+        "CAN 0x2A8 did not resume."
+    )
+
+
+def return_to_safe_bicep_and_disconnect(robot: Nero) -> None:
+    try:
+        robot._arm.set_speed_percent(25)
+        smooth_move_to_target(robot, SAFE_BICEP_JOINTS, "Teach shutdown")
+        print("Teach shutdown: Safe Bicep reached.", flush=True)
+    finally:
+        try:
+            robot.engage_brakes()
+            print("Teach shutdown: all joint brakes engaged.", flush=True)
+        finally:
+            robot.disconnect(disable_arm=False)
 
 
 def main(task: str, output: Path, follower_anchor: list[float]) -> None:
@@ -64,6 +111,8 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     interval = 1.0 / FPS
     next_sample = time.monotonic()
     last_gripper = ("width", 0.1)
+    last_reported_gripper: tuple[str, float] | None = None
+    _, gripper_timestamp = read_gripper_state(effector, last_gripper)
     cv2.namedWindow("NERO teach task", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO teach task", 900, 180)
     print("Teach mode active. Move the robot manually; samples are recorded at 15 FPS.")
@@ -71,12 +120,28 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
 
     try:
         robot.set_teach_mode(True)
+        enable_can_feedback_push(robot._arm)
         robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=1))
+        last_gripper = wait_for_fresh_gripper_feedback(
+            effector, gripper_timestamp
+        )
         while True:
             now = time.monotonic()
             if now >= next_sample:
                 state = [float(value) for value in robot.get_teach_joint_angles()]
-                last_gripper = read_gripper_state(effector, last_gripper)
+                last_gripper, _ = read_gripper_state(effector, last_gripper)
+                threshold = 0.5 if last_gripper[0] == "angle" else 0.0005
+                if (
+                    last_reported_gripper is None
+                    or last_gripper[0] != last_reported_gripper[0]
+                    or abs(last_gripper[1] - last_reported_gripper[1]) > threshold
+                ):
+                    print(
+                        f"Teach gripper feedback: mode={last_gripper[0]} "
+                        f"value={last_gripper[1]:.6f}",
+                        flush=True,
+                    )
+                    last_reported_gripper = last_gripper
                 sequence.append({
                     "time": time.monotonic(),
                     "joints": state,
@@ -89,9 +154,11 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
 
             canvas = np.zeros((180, 900, 3), dtype=np.uint8)
             cv2.putText(canvas, "TEACH MODE - move the robot manually", (24, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(canvas, f"Samples: {len(sequence)}    Gripper: {last_gripper[1]:.3f} {last_gripper[0]}    Press q to save", (24, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 220, 255), 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"Samples: {len(sequence)}    Gripper: {last_gripper[1]:.3f} {last_gripper[0]}", (24, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 220, 255), 1, cv2.LINE_AA)
+            cv2.putText(canvas, "Backdrive arm and gripper    q: save", (24, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 220, 255), 1, cv2.LINE_AA)
             cv2.imshow("NERO teach task", canvas)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
             time.sleep(0.005)
     finally:
@@ -104,10 +171,17 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
             cv2.destroyAllWindows()
 
     if len(sequence) < 2:
+        return_to_safe_bicep_and_disconnect(robot)
         raise RuntimeError("Teach task was too short; record at least two samples.")
     start_time = float(sequence[0]["time"])
     for sample in sequence:
         sample["time"] = float(sample["time"]) - start_time
+    gripper_values = [float(sample["gripper"]) for sample in sequence]
+    print(
+        f"Recorded gripper range: min={min(gripper_values):.6f} "
+        f"max={max(gripper_values):.6f}",
+        flush=True,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     recording = {
         "task": task,
@@ -125,7 +199,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         output.write_text(json.dumps(recording, indent=2))
         print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
         print(f"Replay unavailable: {exc}", flush=True)
-        robot.disconnect()
+        return_to_safe_bicep_and_disconnect(robot)
         return
     output.write_text(json.dumps({
         "task": task,
@@ -136,7 +210,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         "samples": sequence,
     }, indent=2))
     print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
-    robot.disconnect()
+    return_to_safe_bicep_and_disconnect(robot)
 
 
 if __name__ == "__main__":

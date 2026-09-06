@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-faithful-replay-29`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-safe-teach-shutdown-32`.
 
 ## Core Principles
 
@@ -272,7 +272,8 @@ Important replay rules:
 
 - End the teach process immediately after saving and disconnect it. Never replay on the arm object that just left leader/drag-teach mode.
 - Let NERO Lab reconnect, verify Safe Bicep from live encoders, and launch Replay Task as a separate process. A disconnected GUI must connect and require Safe Bicep rather than launching replay from an unknown physical pose.
-- During the brief GUI-to-task subprocess handoff, release the GUI connection without disabling the motors. Disabling before the new process connects lets the unsupported arm sag away from the encoder-verified Safe Bicep pose. Ordinary disconnect and shutdown still brake and disable normally.
+- During the brief GUI-to-task subprocess handoff, release the GUI connection without disabling the motors. Disabling before the new process connects lets the unsupported arm sag away from the encoder-verified Safe Bicep pose. Ordinary disconnect first sends emergency stop, waits until all seven motor-enable bits confirm that the mechanical brakes are engaged, and only falls back to `disable()` if that confirmation does not arrive.
+- After Teach saves its samples, it returns to Safe Bicep under follower control, verifies the target, engages and verifies all seven brakes, and only then closes the CAN connection. The Safe Bicep return is not appended to the taught trajectory.
 - Use a clean connection with `reset_on_connect=False`.
 - Do not immediately call `set_teach_mode(False)` on a fresh replay connection; that redundantly invokes follower/reset behavior.
 - Select J mode explicitly before replay.
@@ -281,6 +282,7 @@ Important replay rules:
 - Use 25 percent controller speed only for the eased approach to sample 1, then 100 percent during the timestamped taught trajectory so controller speed limiting does not distort faster manual motion.
 - Keep camera acquisition out of standalone replay's motion scheduler so frame latency cannot delay joint commands.
 - Record gripper feedback with its SDK mode. Width-mode values replay through `move_gripper_m`; angle-mode values replay through `move_gripper_deg` on the same recorded timeline.
+- The teach gripper remains backdrivable; no open/close keys are used. Entering leader mode disables regular CAN feedback push, so Teach immediately re-enables it with the SDK's mode-only sentinel update (`move_mode=255`) without changing leader state. It then requires a newly timestamped `get_gripper_status()` frame before recording; this `0x2A8` message is the physical gripper position, unlike `get_gripper_ctrl_states()`, which only echoes commands.
 - Require exactly seven finite values in every recorded target.
 - Do not reject or clamp a taught target against the reset and GUI application envelope. If teach mode can record the pose, replay sends that converted pose exactly.
 - During replay-and-record, store measured joints in `observation.state` and taught target joints plus gripper in `action`.

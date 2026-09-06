@@ -103,6 +103,7 @@ def test_task_handoff_disconnect_can_preserve_enabled_motors():
     class DummyArm:
         def __init__(self):
             self.disable_calls = 0
+            self.disconnect_calls = 0
 
         def is_connected(self):
             return True
@@ -110,13 +111,45 @@ def test_task_handoff_disconnect_can_preserve_enabled_motors():
         def disable(self):
             self.disable_calls += 1
 
+        def disconnect(self):
+            self.disconnect_calls += 1
+
     dummy = DummyArm()
     robot._arm = dummy
 
     robot.disconnect(disable_arm=False)
 
     assert dummy.disable_calls == 0
+    assert dummy.disconnect_calls == 1
     assert robot._arm is None
+
+
+def test_engage_brakes_waits_for_emergency_stop_to_latch():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class DummyArm:
+        def __init__(self):
+            self.events = []
+
+        def is_connected(self):
+            return True
+
+        def electronic_emergency_stop(self):
+            self.events.append("emergency_stop")
+
+        def get_joints_enable_status_list(self):
+            return [False] * 7
+
+        def disable(self):
+            self.events.append("disable")
+
+    dummy = DummyArm()
+    robot._arm = dummy
+
+    robot.engage_brakes()
+
+    assert dummy.events == ["emergency_stop"]
 
 
 def test_robot_observation_and_action_keys_match_lerobot_schema():

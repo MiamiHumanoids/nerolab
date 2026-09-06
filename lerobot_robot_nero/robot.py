@@ -288,16 +288,47 @@ class Nero(Robot):
         self._arm.move_j(target)
         return {"action": [float(value) for value in target]}
 
+    def engage_brakes(self, timeout: float = 2.0) -> None:
+        if self._arm is None or not self.is_connected:
+            raise RuntimeError("Nero is not connected")
+
+        arm = self._arm
+        arm.electronic_emergency_stop()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not any(arm.get_joints_enable_status_list()):
+                return
+            time.sleep(0.05)
+
+        if not hasattr(arm, "disable"):
+            raise RuntimeError("Nero arm does not expose a motor-disable command")
+        arm.disable()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not any(arm.get_joints_enable_status_list()):
+                return
+            time.sleep(0.05)
+        raise RuntimeError(
+            f"Nero joint brakes did not engage; enabled joints="
+            f"{arm.get_joints_enable_status_list()}"
+        )
+
     def disconnect(self, disable_arm: bool = True) -> None:
         if self._overview_camera is not None:
             self._overview_camera.disconnect()
         if self._arm is not None:
             try:
-                if disable_arm and self.is_connected and hasattr(self._arm, "disable"):
-                    self._arm.disable()
+                if disable_arm and self.is_connected:
+                    self.engage_brakes()
             except Exception:
-                logger.debug("Ignoring disconnect failure", exc_info=True)
+                logger.exception("Failed to engage Nero brakes before disconnect")
+                raise
             finally:
+                try:
+                    if hasattr(self._arm, "disconnect"):
+                        self._arm.disconnect()
+                except Exception:
+                    logger.debug("Ignoring SDK disconnect failure", exc_info=True)
                 self._arm = None
 
     def get_arm_status(self) -> Any:
