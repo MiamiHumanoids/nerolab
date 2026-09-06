@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-outside-limit-recovery-17"
+APP_BUILD = "2026-09-06-smooth-stream-18"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -28,8 +28,8 @@ UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
-RESET_SEGMENT_MAX_DELTA = 0.14
-RESET_BLEND_DISTANCE = 0.04
+RESET_STREAM_INTERVAL_S = 0.02
+RESET_STREAM_SPEED_RAD_S = 0.4
 RESET_LIMIT_MARGIN = 0.005
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
@@ -505,7 +505,8 @@ class NeroLab(tk.Tk):
                 )
                 moved = False
                 saw_in_progress = False
-                deadline = time.monotonic() + 8.0
+                started_at = time.monotonic()
+                deadline = started_at + 10.0
                 while time.monotonic() < deadline:
                     current = [float(value) for value in robot.get_joint_angles()]
                     moved = moved or any(
@@ -524,6 +525,11 @@ class NeroLab(tk.Tk):
                     ):
                         self.log_arm_debug(f"{label} P recovery completed")
                         break
+                    if not moved and time.monotonic() - started_at >= 1.5:
+                        self.log_message(
+                            f"DEBUG {label} P recovery {attempt}/3 did not start within 1.5s; retrying"
+                        )
+                        break
                     time.sleep(0.05)
                 else:
                     progress = "partial encoder movement" if moved else "no encoder movement"
@@ -531,7 +537,8 @@ class NeroLab(tk.Tk):
                         f"DEBUG {label} P recovery {attempt}/3 ended with {progress}; retrying"
                     )
                     continue
-                break
+                if moved and saw_in_progress and "NORMAL" in arm_status and "SUCCESSFULLY" in motion_status:
+                    break
             else:
                 raise RuntimeError(
                     f"{label} clean-connect P recovery did not complete: {self.arm_debug_text(robot)}"
@@ -543,13 +550,19 @@ class NeroLab(tk.Tk):
     def move_joint_path(self, robot: Nero, target: list[float], label: str) -> None:
         start = [float(value) for value in robot.get_joint_angles()]
         largest_delta = max(abs(goal - value) for value, goal in zip(start, target))
-        segment_count = max(1, int(largest_delta / RESET_SEGMENT_MAX_DELTA) + 1)
+        duration = max(0.75, largest_delta / RESET_STREAM_SPEED_RAD_S)
+        step_count = max(1, int(duration / RESET_STREAM_INTERVAL_S) + 1)
+        motion_command = getattr(robot._arm, "move_js", None)
+        if motion_command is None:
+            raise RuntimeError("Installed pyAgxArm does not provide move_js for smooth reset motion")
         self.log_message(
-            f"COMMAND {label} blended J path has {segment_count} segment(s); "
+            f"COMMAND {label} smooth joint stream steps={step_count} duration={duration:.2f}s "
             f"start={start} target={target}"
         )
-        for segment_index in range(1, segment_count + 1):
-            fraction = segment_index / segment_count
+        stream_started = time.monotonic()
+        for step_index in range(1, step_count + 1):
+            progress = step_index / step_count
+            fraction = progress * progress * (3.0 - 2.0 * progress)
             raw_waypoint = [
                 value + (goal - value) * fraction
                 for value, goal in zip(start, target)
@@ -558,25 +571,11 @@ class NeroLab(tk.Tk):
                 min(max(value, lower + RESET_LIMIT_MARGIN), upper - RESET_LIMIT_MARGIN)
                 for value, (lower, upper) in zip(raw_waypoint, COMMAND_JOINT_LIMITS)
             ]
-            move_result = robot._arm.move_j(waypoint)
-            self.log_message(
-                f"COMMAND {label} segment {segment_index}/{segment_count} "
-                f"move_j={move_result!r} target={[round(value, 6) for value in waypoint]}"
-            )
-            if segment_index == segment_count:
-                break
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                current = [float(value) for value in robot.get_joint_angles()]
-                if max(abs(value - goal) for value, goal in zip(current, waypoint)) <= RESET_BLEND_DISTANCE:
-                    break
-                time.sleep(0.02)
-            else:
-                raise RuntimeError(
-                    f"{label} stalled before blend point {segment_index}/{segment_count}; "
-                    f"current joints={robot.get_joint_angles()}; target={waypoint}; "
-                    f"status={robot._arm.get_arm_status()}"
-                )
+            motion_command(waypoint)
+            next_step_at = stream_started + step_index * duration / step_count
+            remaining = next_step_at - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
         self.wait_for_joint_target(robot, target, label)
 
     def emergency_brake(self) -> None:
