@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-teach-anchor-20`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-task-refresh-21`.
 
 ## Core Principles
 

@@ -117,7 +117,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         "follower_anchor": follower_anchor,
         "samples": sequence,
     }, indent=2))
-    print(f"Saved taught task: {output} ({len(sequence)} samples)")
+    print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
     replay_trigger = output.with_suffix(".replay")
     replay_trigger.unlink(missing_ok=True)
     print("Waiting for Replay task from NERO Lab...")

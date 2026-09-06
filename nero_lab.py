@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-teach-anchor-20"
+APP_BUILD = "2026-09-06-task-refresh-21"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -1013,6 +1013,8 @@ class NeroLab(tk.Tk):
         assert process.stdout is not None
         for line in process.stdout:
             self.after(0, self.log_message, line)
+            if label == "Teach task" and line.startswith("Saved taught task:"):
+                self.after(0, self.refresh_tasks)
         code = process.wait()
         self.after(0, self.log_message, f"{label} exited with code {code}")
         if label == "Teach task" and code == 0:
