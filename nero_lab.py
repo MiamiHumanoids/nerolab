@@ -19,8 +19,9 @@ import re
 from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
+from task_trajectory import prepare_replay_samples
 
-APP_BUILD = "2026-09-06-task-refresh-21"
+APP_BUILD = "2026-09-06-exact-teach-replay-23"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -921,7 +922,10 @@ class NeroLab(tk.Tk):
         self.task_list.delete(0, "end")
         for path in self.taught_task_files:
             try:
-                task = str(json.loads(path.read_text()).get("task", path.stem))
+                recording = json.loads(path.read_text())
+                task = str(recording.get("task", path.stem))
+                if self._recording_replay_error(recording):
+                    task += " [RECORDING ONLY]"
             except (OSError, ValueError, TypeError):
                 task = path.stem
             self.task_list.insert("end", task)
@@ -1034,6 +1038,22 @@ class NeroLab(tk.Tk):
     def _task_slug(task: str) -> str:
         return re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:50] or "task"
 
+    @staticmethod
+    def _recording_replay_error(recording: dict[str, object]) -> str | None:
+        try:
+            prepare_replay_samples(recording)
+        except (KeyError, TypeError, ValueError) as exc:
+            return str(exc)
+        return None
+
+    @classmethod
+    def _task_replay_error(cls, task_file: Path) -> str | None:
+        try:
+            recording = json.loads(task_file.read_text())
+        except (OSError, ValueError, TypeError) as exc:
+            return f"Could not read the taught task: {exc}"
+        return cls._recording_replay_error(recording)
+
     def _prepare_task_process(self, emergency_brake: bool = True) -> bool:
         if self.robot is None or not self.robot.is_connected:
             return True
@@ -1081,6 +1101,10 @@ class NeroLab(tk.Tk):
         if not task_file.exists():
             messagebox.showwarning("No taught task", "Click Teach Task and save a motion before replaying it.")
             return
+        replay_error = self._task_replay_error(task_file)
+        if replay_error:
+            messagebox.showwarning("Task cannot be replayed", replay_error)
+            return
         self.clear_activity_log()
         if not self._prepare_task_process(emergency_brake=False):
             return
@@ -1095,6 +1119,10 @@ class NeroLab(tk.Tk):
         task_file = self.taught_task_file or TASK_BASE / f"{self._task_slug(task)}.json"
         if not task_file.exists():
             messagebox.showwarning("No taught task", "Select or teach a task before replaying it.")
+            return
+        replay_error = self._task_replay_error(task_file)
+        if replay_error:
+            messagebox.showwarning("Task cannot be replayed", replay_error)
             return
         self.clear_activity_log()
         if self.process and self.process.poll() is None and self.taught_task_file == task_file:

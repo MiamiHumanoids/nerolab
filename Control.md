@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-task-refresh-21`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-exact-teach-replay-23`.
 
 ## Core Principles
 
@@ -49,7 +49,9 @@ CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
 
 This pose is used only to escape a singular or out-of-limit joint state. It is not the final reset target.
 
-### Command limits
+### Reset and GUI command envelope
+
+These values are a local application envelope used by reset recovery and GUI sliders. They are not controller-reported hardware limits and must not be applied to taught-task recording or replay.
 
 | Joint | Minimum rad | Maximum rad |
 |---|---:|---:|
@@ -264,7 +266,7 @@ The gripper slider is also debounced. Without debouncing, a drag emitted one com
 
 Teach mode reports leader-space encoder coordinates, which are not directly legal follower-mode commands. New recordings preserve those raw values as `leader_joints` and also store replayable `joints` by anchoring the first leader sample to the verified follower encoder pose captured by NERO Lab before it disconnects and launches the teach process. The anchor must be passed across that process boundary because a fresh teach-process connection can expose leader-like coordinates even before teach mode is enabled. This preserves every taught delta without commanding leader calibration offsets as follower angles.
 
-Legacy recordings without `joint_space: follower` are checked before replay. If their values exceed follower command limits, the first sample is anchored to Safe Bicep and the same relative offsets are applied to the complete trajectory.
+Legacy recordings without `joint_space: follower` are treated as leader-space recordings. Their first sample is anchored to Safe Bicep and the same relative offsets are applied to the complete trajectory.
 
 Important replay rules:
 
@@ -274,7 +276,8 @@ Important replay rules:
 - Ease from the current encoder pose to the first recorded target with a bounded 50 Hz `move_js` stream, then verify that pose from encoders.
 - Replay subsequent targets with `move_js` against their absolute recorded timestamps. Do not wait for every 15 FPS sample to settle; that creates stop-and-go motion and destroys the taught timing.
 - Schedule gripper changes on the same recorded timeline.
-- Validate every converted target against command limits before moving; never silently clamp an unsafe taught trajectory.
+- Require exactly seven finite values in every recorded target.
+- Do not reject or clamp a taught target against the reset and GUI application envelope. If teach mode can record the pose, replay sends that converted pose exactly.
 - During replay-and-record, store measured joints in `observation.state` and taught target joints plus gripper in `action`.
 
 ## Debugging with Activity Trace
@@ -311,7 +314,7 @@ A useful trace includes:
 - Use Safe Bicep before applying the emergency brake or disconnecting whenever possible.
 - Do not increase streaming speed or interval without physical testing.
 - Do not send a large one-shot `move_js` target.
-- Do not silently clamp recorded replay trajectories; report and abort unsafe data instead.
+- Do not clamp recorded replay trajectories; preserve the taught joint values exactly.
 - Do not disable encoder verification to hide intermittent failures.
 - Remember that Upright is singular even when it is reached successfully.
 

@@ -4,13 +4,12 @@ from pathlib import Path
 
 from task_trajectory import (
     SAFE_BICEP_JOINTS,
-    joints_within_limits,
     prepare_replay_samples,
 )
 
 
 class TaskTrajectoryTest(unittest.TestCase):
-    def test_legacy_cactus_recording_converts_to_safe_follower_targets(self):
+    def test_legacy_cactus_recording_preserves_taught_joint_deltas(self):
         task_file = Path(__file__).parents[1] / "tasks" / "pick-up-the-cactus.json"
         recording = json.loads(task_file.read_text())
 
@@ -19,7 +18,13 @@ class TaskTrajectoryTest(unittest.TestCase):
         self.assertEqual(len(samples), 257)
         self.assertEqual(samples[0]["joints"], SAFE_BICEP_JOINTS)
         self.assertEqual(samples[0]["leader_joints"], recording["samples"][0]["joints"])
-        self.assertTrue(all(joints_within_limits(sample["joints"]) for sample in samples))
+        for leader_start, leader_end, follower_start, follower_end in zip(
+            recording["samples"][0]["joints"],
+            recording["samples"][-1]["joints"],
+            samples[0]["joints"],
+            samples[-1]["joints"],
+        ):
+            self.assertAlmostEqual(follower_end - follower_start, leader_end - leader_start)
         self.assertTrue(all(
             float(current["time"]) <= float(following["time"])
             for current, following in zip(samples, samples[1:])
@@ -48,11 +53,28 @@ class TaskTrajectoryTest(unittest.TestCase):
         prepared = prepare_replay_samples({
             "joint_space": "leader",
             "follower_anchor": anchor,
+            "replay_ready": False,
+            "replay_error": "Recorded sample 2 cannot be converted inside command limits",
             "samples": samples,
         })
 
         self.assertEqual(prepared[0]["joints"], anchor)
         self.assertAlmostEqual(prepared[1]["joints"][0], 0.15)
+
+    def test_recorded_pose_is_not_rejected_or_clamped(self):
+        anchor = SAFE_BICEP_JOINTS.copy()
+        samples = [
+            {"time": 0.0, "joints": [0.0] * 7, "gripper": 0.1},
+            {"time": 0.1, "joints": [0.0] * 5 + [0.973745, 0.0], "gripper": 0.1},
+        ]
+
+        prepared = prepare_replay_samples({
+            "joint_space": "leader",
+            "follower_anchor": anchor,
+            "samples": samples,
+        })
+
+        self.assertEqual(prepared[1]["joints"][5], anchor[5] + 0.973745)
 
 
 if __name__ == "__main__":

@@ -102,19 +102,30 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     for sample in sequence:
         sample["time"] = float(sample["time"]) - start_time
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({
+    recording = {
         "task": task,
         "fps": FPS,
         "joint_space": "leader",
         "follower_anchor": follower_anchor,
         "samples": sequence,
-    }, indent=2))
-    sequence = convert_leader_samples(sequence, follower_anchor)
+    }
+    output.write_text(json.dumps(recording, indent=2))
+    try:
+        sequence = convert_leader_samples(sequence, follower_anchor)
+    except ValueError as exc:
+        recording["replay_ready"] = False
+        recording["replay_error"] = str(exc)
+        output.write_text(json.dumps(recording, indent=2))
+        print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
+        print(f"Replay unavailable: {exc}", flush=True)
+        robot.disconnect()
+        return
     output.write_text(json.dumps({
         "task": task,
         "fps": FPS,
         "joint_space": "follower",
         "follower_anchor": follower_anchor,
+        "replay_ready": True,
         "samples": sequence,
     }, indent=2))
     print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)

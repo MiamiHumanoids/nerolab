@@ -2,31 +2,15 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
 SAFE_BICEP_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.5]
-COMMAND_JOINT_LIMITS = [
-    (-2.705261, 2.705261),
-    (-1.74533, 1.74533),
-    (-2.757621, 2.757621),
-    (-1.012291, 2.146755),
-    (-2.757621, 2.757621),
-    (-0.733039, 0.959932),
-    (-1.570797, 1.570797),
-]
 STREAM_INTERVAL_S = 0.02
 STREAM_SPEED_RAD_S = 0.4
-LIMIT_MARGIN = 0.005
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
-
-
-def joints_within_limits(joints: list[float]) -> bool:
-    return len(joints) == 7 and all(
-        lower <= float(value) <= upper
-        for value, (lower, upper) in zip(joints, COMMAND_JOINT_LIMITS)
-    )
 
 
 def convert_leader_samples(
@@ -54,10 +38,6 @@ def prepare_replay_samples(recording: dict[str, Any]) -> list[dict[str, Any]]:
         _validate_targets(samples)
         return samples
 
-    targets = [[float(value) for value in sample["joints"]] for sample in samples]
-    if joint_space is None and all(joints_within_limits(target) for target in targets):
-        return samples
-
     follower_anchor = [
         float(value) for value in recording.get("follower_anchor", SAFE_BICEP_JOINTS)
     ]
@@ -81,11 +61,8 @@ def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:
         progress = step_index / step_count
         fraction = progress * progress * (3.0 - 2.0 * progress)
         waypoint = [
-            min(
-                max(value + (goal - value) * fraction, lower + LIMIT_MARGIN),
-                upper - LIMIT_MARGIN,
-            )
-            for value, goal, (lower, upper) in zip(start, target, COMMAND_JOINT_LIMITS)
+            value + (goal - value) * fraction
+            for value, goal in zip(start, target)
         ]
         move_js(waypoint)
         remaining = started + step_index * duration / step_count - time.monotonic()
@@ -107,5 +84,5 @@ def _validate_targets(samples: list[dict[str, Any]]) -> None:
         target = [float(value) for value in sample["joints"]]
         if len(target) != 7:
             raise ValueError(f"Recorded sample {index} has {len(target)} joints; expected 7")
-        if not joints_within_limits(target):
-            raise ValueError(f"Recorded sample {index} cannot be converted inside command limits: {target}")
+        if not all(math.isfinite(value) for value in target):
+            raise ValueError(f"Recorded sample {index} contains a non-finite joint value: {target}")
