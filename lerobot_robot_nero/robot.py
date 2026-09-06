@@ -132,7 +132,11 @@ class Nero(Robot):
         self._arm.set_joint_limits_enabled(False)
         self._arm.set_speed_percent(self.config.speed_percent)
         if self.config.reset_on_connect and hasattr(self._arm, "reset"):
+            if hasattr(self._arm, "set_follower_mode"):
+                self._arm.set_follower_mode()
+                time.sleep(0.5)
             self._arm.reset()
+            time.sleep(1.0)
         if hasattr(self._arm, "enable"):
             deadline = time.monotonic() + 5.0
             enabled = False

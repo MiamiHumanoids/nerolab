@@ -22,7 +22,8 @@ from lerobot_robot_nero import Nero, NeroConfig
 
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
-SAFE_BICEP_RESET_JOINTS = [0.0, -1.73533, 0.023, 2.136755, -0.026, 0.076, 1.560797]
+UPRIGHT_RESET_JOINTS = [0.0, -0.2, 0.0, 0.4, 0.0, 0.2, 0.0]
+SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -254,7 +255,7 @@ class NeroLab(tk.Tk):
         gripper = ttk.LabelFrame(parent, text="Gripper width (meters)", padding=12)
         gripper.pack(fill="x", pady=10)
         tk.Scale(gripper, from_=0.0, to=0.1, resolution=0.001, orient="horizontal", variable=self.gripper_var, showvalue=True, length=700, command=lambda _value: self.slider_gripper()).pack(fill="x")
-        ttk.Label(parent, text="Upright Reset sends joints [0, 0, 0, 0, 0, 0, 0] and opens the gripper to 0.1 m.", foreground="#555555").pack(anchor="w", pady=12)
+        ttk.Label(parent, text=f"Upright Reset sends joints {UPRIGHT_RESET_JOINTS} and opens the gripper to 0.1 m.", foreground="#555555").pack(anchor="w", pady=12)
 
     def _build_policy_options(self, parent: ttk.Frame) -> ttk.LabelFrame:
         policy = ttk.LabelFrame(parent, text="Fine Tune", padding=12)
@@ -404,15 +405,7 @@ class NeroLab(tk.Tk):
             return
         self.safe_bicep_position_reached = False
         try:
-            robot._arm.reset()
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                if robot._arm.enable():
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError("Arm joints did not re-enable within 5 seconds")
-            robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
+            robot.set_teach_mode(False)
             robot._arm.set_speed_percent(100)
             self.speed_var.set(100.0)
             self.set_arm_status_display("Arm status: re-enabled")
@@ -497,14 +490,11 @@ class NeroLab(tk.Tk):
         self.cancel_slider_motion()
         self.safe_bicep_position_reached = False
         try:
-            if robot._teach_mode_enabled:
-                robot.set_teach_mode(False)
-            else:
-                robot.configure()
+            robot.set_teach_mode(False)
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-            robot._arm.move_j([0.0] * 7)
-            self.wait_for_joint_target(robot, [0.0] * 7, "zero joint reset")
+            robot._arm.move_j(UPRIGHT_RESET_JOINTS)
+            self.wait_for_joint_target(robot, UPRIGHT_RESET_JOINTS, "upright joint reset")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
             robot._arm.set_speed_percent(100)
         except Exception as exc:
@@ -514,9 +504,9 @@ class NeroLab(tk.Tk):
                 pass
             self.log_message(f"Upright Reset failed: {exc}")
             return
-        self.set_joint_slider_values([0.0] * 7)
+        self.set_joint_slider_values(UPRIGHT_RESET_JOINTS)
         self.gripper_var.set(0.1)
-        self.log_message("Upright Reset sent: joints 0,0,0,0,0,0,0; gripper 0.1 m")
+        self.log_message(f"Upright Reset reached: joints {UPRIGHT_RESET_JOINTS}; gripper 0.1 m")
 
     def wait_for_joint_target(self, robot: Nero, target: list[float], label: str, timeout: float = 8.0) -> None:
         deadline = time.monotonic() + timeout
@@ -536,10 +526,7 @@ class NeroLab(tk.Tk):
             return
         self.cancel_slider_motion()
         try:
-            if robot._teach_mode_enabled:
-                robot.set_teach_mode(False)
-            else:
-                robot.configure()
+            robot.set_teach_mode(False)
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
             robot._arm.move_j(SAFE_BICEP_RESET_JOINTS)
