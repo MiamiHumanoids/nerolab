@@ -22,9 +22,9 @@ from lerobot_robot_nero import Nero, NeroConfig
 
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
-UPRIGHT_APPROACH_POSE = [-0.4, 0.0, 0.4, -1.5708, 0.0, -3.14159]
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.73533, 0.023, 2.136755, -0.026, 0.076, 1.560797]
 RESET_SPEED_PERCENT = 25
+SLIDER_DEBOUNCE_MS = 100
 PROJECT_ROOT = Path(__file__).resolve().parent
 RECORDER = PROJECT_ROOT / "manual_record_dataset.py"
 REPLAYER = PROJECT_ROOT / "replay_latest_dataset.py"
@@ -96,6 +96,8 @@ class NeroLab(tk.Tk):
         self.process: subprocess.Popen[str] | None = None
         self.robot: Nero | None = None
         self.safe_bicep_position_reached = False
+        self.slider_motion_job: str | None = None
+        self.suppress_slider_motion = False
         self.joint_vars = [tk.DoubleVar(value=0.0) for _ in range(7)]
         self.gripper_var = tk.DoubleVar(value=0.1)
         self.joint_enable_vars = [tk.BooleanVar(value=False) for _ in range(7)]
@@ -297,6 +299,7 @@ class NeroLab(tk.Tk):
         self.robot.connect(calibrate=False)
         self.robot._arm.enable()
         self.robot._arm.set_speed_percent(100)
+        self.set_joint_slider_values(self.robot.get_joint_angles())
         for enable_var, disable_var in zip(self.joint_enable_vars, self.joint_disable_vars):
             enable_var.set(True)
             disable_var.set(False)
@@ -313,6 +316,7 @@ class NeroLab(tk.Tk):
         self.log_message("Arm connected")
 
     def disconnect_robot(self, emergency_brake: bool = True) -> None:
+        self.cancel_slider_motion()
         if self.robot is not None:
             try:
                 current = self.robot.get_joint_angles()
@@ -418,14 +422,38 @@ class NeroLab(tk.Tk):
             self.log_message(f"Arm re-enable failed: {exc}")
 
     def slider_motion(self, joint: int) -> None:
+        if self.suppress_slider_motion:
+            return
         robot = self.require_robot()
         if robot is None or not self.joint_enable_vars[joint - 1].get():
+            return
+        if self.slider_motion_job is not None:
+            self.after_cancel(self.slider_motion_job)
+        self.slider_motion_job = self.after(SLIDER_DEBOUNCE_MS, self._send_slider_motion)
+
+    def _send_slider_motion(self) -> None:
+        self.slider_motion_job = None
+        robot = self.require_robot()
+        if robot is None:
             return
         robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
         limits = [(-2.705261, 2.705261), (-1.74533, 1.74533), (-2.757621, 2.757621), (-1.012291, 2.146755), (-2.757621, 2.757621), (-0.733039, 0.959932), (-1.570797, 1.570797)]
         targets = [max(lower, min(upper, variable.get())) for variable, (lower, upper) in zip(self.joint_vars, limits)]
         self.safe_bicep_position_reached = False
         robot._arm.move_j(targets)
+
+    def cancel_slider_motion(self) -> None:
+        if self.slider_motion_job is not None:
+            self.after_cancel(self.slider_motion_job)
+            self.slider_motion_job = None
+
+    def set_joint_slider_values(self, values: list[float]) -> None:
+        self.suppress_slider_motion = True
+        try:
+            for variable, value in zip(self.joint_vars, values):
+                variable.set(value)
+        finally:
+            self.suppress_slider_motion = False
 
     def slider_gripper(self) -> None:
         robot = self.require_robot()
@@ -446,8 +474,7 @@ class NeroLab(tk.Tk):
         if robot is None:
             return
         values = robot.get_joint_angles()
-        for variable, value in zip(self.joint_vars, values):
-            variable.set(value)
+        self.set_joint_slider_values(values)
         self.log_message(f"Joint angles read: {values}")
 
     def check_arm_status(self) -> None:
@@ -467,6 +494,7 @@ class NeroLab(tk.Tk):
         robot = self.require_robot()
         if robot is None:
             return
+        self.cancel_slider_motion()
         self.safe_bicep_position_reached = False
         try:
             if robot._teach_mode_enabled:
@@ -474,12 +502,7 @@ class NeroLab(tk.Tk):
             else:
                 robot.configure()
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
-            robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            robot._arm.move_p(UPRIGHT_APPROACH_POSE)
-            self.wait_for_motion(robot, "Cartesian upright approach")
             robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-            robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             robot._arm.move_j([0.0] * 7)
             self.wait_for_joint_target(robot, [0.0] * 7, "zero joint reset")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
@@ -491,21 +514,9 @@ class NeroLab(tk.Tk):
                 pass
             self.log_message(f"Upright Reset failed: {exc}")
             return
-        for variable in self.joint_vars:
-            variable.set(0.0)
+        self.set_joint_slider_values([0.0] * 7)
         self.gripper_var.set(0.1)
         self.log_message("Upright Reset sent: joints 0,0,0,0,0,0,0; gripper 0.1 m")
-
-    def wait_for_motion(self, robot: Nero, label: str, timeout: float = 8.0) -> None:
-        time.sleep(0.05)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            status = robot._arm.get_arm_status()
-            motion_status = getattr(getattr(status, "msg", status), "motion_status", None)
-            if motion_status == 0:
-                return
-            time.sleep(0.05)
-        raise RuntimeError(f"{label} did not reach its target: {robot._arm.get_arm_status()}")
 
     def wait_for_joint_target(self, robot: Nero, target: list[float], label: str, timeout: float = 8.0) -> None:
         deadline = time.monotonic() + timeout
@@ -523,23 +534,14 @@ class NeroLab(tk.Tk):
         robot = self.require_robot()
         if robot is None:
             return
+        self.cancel_slider_motion()
         try:
-            if hasattr(robot._arm, "reset"):
-                robot._arm.reset()
-            if hasattr(robot._arm, "enable"):
-                deadline = time.monotonic() + 5.0
-                while time.monotonic() < deadline and not robot._arm.enable():
-                    time.sleep(0.1)
             if robot._teach_mode_enabled:
                 robot.set_teach_mode(False)
             else:
                 robot.configure()
             robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
-            robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
-            robot._arm.move_p(UPRIGHT_APPROACH_POSE)
-            self.wait_for_motion(robot, "Safe Bicep Reset upright approach")
             robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-            robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
             robot._arm.move_j(SAFE_BICEP_RESET_JOINTS)
             self.wait_for_joint_target(robot, SAFE_BICEP_RESET_JOINTS, "Safe Bicep Reset")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
@@ -551,8 +553,7 @@ class NeroLab(tk.Tk):
                 pass
             self.log_message(f"Safe Bicep Reset failed: {exc}")
             return
-        for variable, value in zip(self.joint_vars, SAFE_BICEP_RESET_JOINTS):
-            variable.set(value)
+        self.set_joint_slider_values(SAFE_BICEP_RESET_JOINTS)
         self.safe_bicep_position_reached = True
         self.gripper_var.set(0.1)
         self.log_message("Safe Bicep Reset sent; gripper 0.1 m")
