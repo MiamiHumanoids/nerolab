@@ -9,6 +9,16 @@ from typing import Any
 
 SAFE_BICEP_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.5]
 SAFE_BICEP_BRAKED_JOINTS = [0.0, -1.7655, 0.023, 2.1964, -0.026, 0.0765, 1.6895]
+CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
+COMMAND_JOINT_LIMITS = [
+    (-2.705261, 2.705261),
+    (-1.74533, 1.74533),
+    (-2.757621, 2.757621),
+    (-1.012291, 2.146755),
+    (-2.757621, 2.757621),
+    (-0.733039, 0.959932),
+    (-1.570797, 1.570797),
+]
 STREAM_INTERVAL_S = 0.02
 STREAM_SPEED_RAD_S = 0.4
 TARGET_TOLERANCE = 0.01
@@ -159,13 +169,67 @@ def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:
             return
         time.sleep(STREAM_INTERVAL_S)
     raise RuntimeError(
-        f"{label} did not reach the first recorded target; current joints={robot.get_joint_angles()}"
+        f"{label} did not reach target; current joints={robot.get_joint_angles()}"
     )
+
+
+def prepare_safe_bicep_motion(robot: Any, label: str) -> None:
+    current = [float(value) for value in robot.get_joint_angles()]
+    status = robot.get_arm_status()
+    message = getattr(status, "msg", status)
+    arm_status = str(getattr(message, "arm_status", ""))
+    outside_limits = any(
+        value < lower or value > upper
+        for value, (lower, upper) in zip(current, COMMAND_JOINT_LIMITS)
+    )
+    if outside_limits or "NO_SOLUTION" in arm_status or "SINGULARITY" in arm_status:
+        reason = "current joints outside command limits" if outside_limits else arm_status
+        print(f"{label}: running P-to-J recovery because {reason}.", flush=True)
+        robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
+        time.sleep(0.2)
+        recovered = False
+        for attempt in range(1, 5):
+            start = [float(value) for value in robot.get_joint_angles()]
+            robot._arm.move_p(CONTROL_PRIME_POSE)
+            moved = False
+            saw_in_progress = False
+            started_at = time.monotonic()
+            deadline = started_at + 10.0
+            while time.monotonic() < deadline:
+                current = [float(value) for value in robot.get_joint_angles()]
+                moved = moved or any(
+                    abs(value - initial) > 0.002
+                    for value, initial in zip(current, start)
+                )
+                status = robot.get_arm_status()
+                message = getattr(status, "msg", status)
+                arm_status = str(getattr(message, "arm_status", ""))
+                motion_status = str(getattr(message, "motion_status", ""))
+                saw_in_progress = saw_in_progress or "FAILED" in motion_status
+                if (
+                    moved
+                    and saw_in_progress
+                    and "NORMAL" in arm_status
+                    and "SUCCESSFULLY" in motion_status
+                ):
+                    recovered = True
+                    break
+                if not moved and time.monotonic() - started_at >= 1.5:
+                    break
+                time.sleep(0.05)
+            if recovered:
+                print(f"{label}: P recovery completed on attempt {attempt}.", flush=True)
+                break
+        if not recovered:
+            raise RuntimeError(f"{label} P-to-J recovery did not complete")
+    robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
+    time.sleep(0.2)
 
 
 def safe_bicep_shutdown(robot: Any, label: str) -> None:
     try:
         robot._arm.set_speed_percent(25)
+        prepare_safe_bicep_motion(robot, label)
         smooth_move_to_target(robot, SAFE_BICEP_JOINTS, label)
         print(f"{label}: Safe Bicep reached.", flush=True)
     finally:

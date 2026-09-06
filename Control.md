@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-braked-safe-bicep-36`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-teach-recovery-gripper-37`.
 
 ## Core Principles
 
@@ -272,6 +272,7 @@ Important replay rules:
 
 - End the teach process immediately after saving and disconnect it. Never replay on the arm object that just left leader/drag-teach mode.
 - Let NERO Lab reconnect, verify Safe Bicep from live encoders, and launch Replay Task as a separate process. A disconnected GUI must connect and require Safe Bicep rather than launching replay from an unknown physical pose.
+- When a task starts from the recognized brake-settled Safe Bicep pose, the GUI clears emergency stop and verifies the live pose before process handoff. The Teach subprocess uses `reset_on_connect=False` because that recovery has already completed.
 - During the brief GUI-to-task subprocess handoff, release the GUI connection without changing motor state. Ordinary disconnect sends emergency stop and lets the arm descend smoothly from Safe Bicep to its mechanical resting pose. Nero v121 continues to report every joint as enabled during `EMERGENCY_STOP`, so enable bits are not used as brake confirmation and no subsequent `disable()` command is sent.
 - After emergency stop latches, disconnect monitors encoder motion until every joint changes by no more than 0.001 rad for 0.75 seconds, then closes CAN. If the resting pose does not settle within 8 seconds, disconnect aborts and leaves CAN connected.
 - The encoder-confirmed mechanical resting pose reached by braking from Safe Bicep is also classified as safe. On reconnect, the GUI recognizes that narrowly bounded pose and does not require another Safe Bicep reset before a task flow.
@@ -284,8 +285,9 @@ Important replay rules:
 - Interpolate between 15 FPS recorded targets and stream `move_js` at 50 Hz against their absolute timestamps. Every original sample remains an exact stream point; the added points prevent coarse steps without changing the taught path or timing.
 - Use 25 percent controller speed only for the eased approach to sample 1, then 100 percent during the timestamped taught trajectory so controller speed limiting does not distort faster manual motion.
 - Keep camera acquisition out of standalone replay's motion scheduler so frame latency cannot delay joint commands.
-- Record gripper feedback with its SDK mode. Width-mode values replay through `move_gripper_m`; angle-mode values replay through `move_gripper_deg` on the same recorded timeline.
+- Record gripper feedback with its SDK mode. During leader teaching, inspect both physical `0x2A8` and received leader/control `0x159` frames and adopt a channel when its timestamp and value change. Log every source transition. Width-mode values replay through `move_gripper_m`; angle-mode values replay through `move_gripper_deg` on the same recorded timeline.
 - The teach gripper remains backdrivable; no open/close keys are used. Entering leader mode disables regular CAN feedback push, so Teach immediately re-enables it with the SDK's mode-only sentinel update (`move_mode=255`) without changing leader state. It then requires a newly timestamped `get_gripper_status()` frame before recording; this `0x2A8` message is the physical gripper position, unlike `get_gripper_ctrl_states()`, which only echoes commands.
+- Safe shutdown detects a current pose outside the J-command envelope and first runs the same proven Cartesian P recovery used by the GUI. It switches to J mode only after that recovery completes, preventing Teach shutdown from stalling at the command-envelope boundary.
 - Require exactly seven finite values in every recorded target.
 - Do not reject or clamp a taught target against the reset and GUI application envelope. If teach mode can record the pose, replay sends that converted pose exactly.
 - During replay-and-record, store measured joints in `observation.state` and taught target joints plus gripper in `action`.

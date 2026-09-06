@@ -149,6 +149,9 @@ class TaskTrajectoryTest(unittest.TestCase):
                 events.append(("disconnect", disable_arm))
 
         with patch(
+            "task_trajectory.prepare_safe_bicep_motion",
+            side_effect=lambda robot, label: events.append(("prepare", label)),
+        ), patch(
             "task_trajectory.smooth_move_to_target",
             side_effect=lambda robot, target, label: events.append(
                 ("move", target.copy(), label)
@@ -158,6 +161,7 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         self.assertEqual(events, [
             ("speed", 25),
+            ("prepare", "Replay shutdown"),
             ("move", SAFE_BICEP_JOINTS, "Replay shutdown"),
             ("brakes",),
             ("disconnect", False),

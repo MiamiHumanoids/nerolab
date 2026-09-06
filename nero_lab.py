@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import SAFE_BICEP_JOINTS, is_safe_bicep_pose, prepare_replay_samples
 
-APP_BUILD = "2026-09-06-braked-safe-bicep-36"
+APP_BUILD = "2026-09-06-teach-recovery-gripper-37"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -1072,6 +1072,16 @@ class NeroLab(tk.Tk):
                 messagebox.showerror("Arm connection failed", str(exc))
                 return False
         if self.robot is None or not self.robot.is_connected:
+            return False
+        try:
+            status = self.robot.get_arm_status()
+            message = getattr(status, "msg", status)
+            arm_status = str(getattr(message, "arm_status", ""))
+            if "EMERGENCY_STOP" in arm_status or "EMERGENCY STOP" in arm_status:
+                self.log_message("Re-enabling brake-settled arm for task handoff")
+                self.reenable_arm()
+        except Exception as exc:
+            self.log_message(f"Could not prepare arm for task handoff: {exc}")
             return False
         try:
             current = self.robot.get_joint_angles()
