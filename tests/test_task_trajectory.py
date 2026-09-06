@@ -6,6 +6,7 @@ from unittest.mock import patch
 from task_trajectory import (
     SAFE_BICEP_BRAKED_JOINTS,
     SAFE_BICEP_JOINTS,
+    append_safe_bicep_return,
     command_recorded_gripper,
     interpolated_joint_trajectory,
     is_safe_bicep_pose,
@@ -58,6 +59,35 @@ class TaskTrajectoryTest(unittest.TestCase):
         self.assertIs(prepared[0], samples[0])
         self.assertNotIn("leader_joints", prepared[0])
 
+    def test_post_processing_appends_exact_safe_bicep_return(self):
+        final_pose = SAFE_BICEP_JOINTS.copy()
+        final_pose[1] -= 0.2
+        samples = [
+            {"time": 0.0, "joints": [0.0] * 7, "gripper": 0.04},
+            {"time": 1.0, "joints": final_pose, "gripper": 0.03},
+        ]
+
+        processed = append_safe_bicep_return(samples)
+
+        self.assertEqual(processed[:-1], samples)
+        self.assertEqual(processed[-1]["joints"], SAFE_BICEP_JOINTS)
+        self.assertEqual(processed[-1]["gripper"], 0.1)
+        self.assertEqual(processed[-1]["gripper_mode"], "width")
+        self.assertAlmostEqual(processed[-1]["time"], 1.75)
+        self.assertEqual(samples[-1]["joints"], final_pose)
+
+    def test_post_processing_normalizes_existing_safe_bicep_endpoint(self):
+        almost_safe = SAFE_BICEP_JOINTS.copy()
+        almost_safe[0] += 1e-10
+        samples = [{"time": 1.0, "joints": almost_safe, "gripper": 0.03}]
+
+        processed = append_safe_bicep_return(samples)
+
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[-1]["joints"], SAFE_BICEP_JOINTS)
+        self.assertEqual(processed[-1]["gripper"], 0.1)
+        self.assertEqual(processed[-1]["gripper_mode"], "width")
+
     def test_leader_recording_uses_its_saved_follower_anchor(self):
         anchor = SAFE_BICEP_JOINTS.copy()
         anchor[0] = 0.1
@@ -102,7 +132,7 @@ class TaskTrajectoryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Re-record the task with build 38"):
             prepare_replay_samples({"joint_space": "leader", "samples": samples})
 
-    def test_interpolation_hits_recorded_samples_with_20ms_max_spacing(self):
+    def test_interpolation_hits_recorded_samples_with_10ms_max_spacing(self):
         samples = [
             {"time": 0.0, "joints": [0.0] * 7},
             {"time": 0.07, "joints": [0.7] * 7},
@@ -115,7 +145,7 @@ class TaskTrajectoryTest(unittest.TestCase):
         self.assertEqual([point[2] for point in original_points], [0, 1, 2])
         self.assertEqual([point[1] for point in original_points], [sample["joints"] for sample in samples])
         self.assertTrue(all(
-            following[0] - current[0] <= 0.0200001
+            following[0] - current[0] <= 0.0100001
             for current, following in zip(points, points[1:])
         ))
 

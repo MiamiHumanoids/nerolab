@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import SAFE_BICEP_JOINTS, is_safe_bicep_pose, prepare_replay_samples
 
-APP_BUILD = "2026-09-06-replay-start-recovery-39"
+APP_BUILD = "2026-09-06-open-safe-return-42"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -136,6 +136,7 @@ class NeroLab(tk.Tk):
         self.selected_episode = 0
         self.taught_task_file: Path | None = None
         self.taught_task_files: list[Path] = []
+        self.task_handoff_anchor = SAFE_BICEP_RESET_JOINTS.copy()
         self.task_var = tk.StringVar(value="pick up the banana")
         self.policy_var = tk.StringVar(value="")
         self.steps_var = tk.StringVar(value="5000")
@@ -1073,19 +1074,29 @@ class NeroLab(tk.Tk):
                 return False
         if self.robot is None or not self.robot.is_connected:
             return False
+        brake_settled = False
         try:
             status = self.robot.get_arm_status()
             message = getattr(status, "msg", status)
             arm_status = str(getattr(message, "arm_status", ""))
             if "EMERGENCY_STOP" in arm_status or "EMERGENCY STOP" in arm_status:
+                brake_settled = True
                 self.log_message("Re-enabling brake-settled arm for task handoff")
                 self.reenable_arm()
+                self.safe_bicep_reset()
         except Exception as exc:
             self.log_message(f"Could not prepare arm for task handoff: {exc}")
             return False
         try:
             current = self.robot.get_joint_angles()
             safe = self.is_safe_bicep_position(current)
+            if brake_settled:
+                safe = all(
+                    abs(float(value) - target) <= 0.01
+                    for value, target in zip(current, SAFE_BICEP_RESET_JOINTS)
+                )
+            if safe:
+                self.task_handoff_anchor = [float(value) for value in current]
         except Exception as exc:
             self.log_message(f"Could not verify task start pose: {exc}")
             safe = False
@@ -1100,14 +1111,9 @@ class NeroLab(tk.Tk):
         if not task:
             messagebox.showwarning("Task required", "Enter a task instruction first.")
             return
-        follower_anchor = SAFE_BICEP_RESET_JOINTS.copy()
-        if self.robot is not None and self.robot.is_connected:
-            try:
-                follower_anchor = [float(value) for value in self.robot.get_joint_angles()]
-            except Exception:
-                pass
         if not self._prepare_task_process(emergency_brake=False):
             return
+        follower_anchor = self.task_handoff_anchor.copy()
         TASK_BASE.mkdir(parents=True, exist_ok=True)
         output = TASK_BASE / f"{self._task_slug(task)}.json"
         self.taught_task_file = output

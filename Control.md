@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-replay-start-recovery-39`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-open-safe-return-42`.
 
 ## Core Principles
 
@@ -283,13 +283,15 @@ Important replay rules:
 - Select J mode explicitly before replay.
 - Ease from the current encoder pose to the first recorded target with a bounded 50 Hz `move_js` stream, then verify that pose from encoders.
 - Before that initial replay approach, run P-to-J recovery whenever the current brake-settled pose lies outside the J-command envelope. This prevents the approach from stalling at joints 2 and 4 command boundaries before sample 1.
-- Interpolate between 15 FPS recorded targets and stream `move_js` at 50 Hz against their absolute timestamps. Every original sample remains an exact stream point; the added points prevent coarse steps without changing the taught path or timing.
+- Record leader joints and gripper state at 50 FPS, then interpolate and stream `move_js` at 100 Hz against absolute timestamps. Every original sample remains an exact stream point; the denser capture and command intervals reduce path quantization without changing taught timing.
 - Use 25 percent controller speed only for the eased approach to sample 1, then 100 percent during the timestamped taught trajectory so controller speed limiting does not distort faster manual motion.
 - Keep camera acquisition out of standalone replay's motion scheduler so frame latency cannot delay joint commands.
 - Record gripper feedback with its SDK mode. During leader teaching, inspect both physical `0x2A8` and received leader/control `0x159` frames and adopt a channel when its timestamp and value change. Log every source transition. Width-mode values replay through `move_gripper_m`; angle-mode values replay through `move_gripper_deg` on the same recorded timeline.
 - The teach gripper remains backdrivable; no open/close keys are used. Entering leader mode disables regular CAN feedback push, so Teach immediately re-enables it with the SDK's mode-only sentinel update (`move_mode=255`) without changing leader state. It then requires a newly timestamped `get_gripper_status()` frame before recording; this `0x2A8` message is the physical gripper position, unlike `get_gripper_ctrl_states()`, which only echoes commands.
 - Safe shutdown detects a current pose outside the J-command envelope and first runs the same proven Cartesian P recovery used by the GUI. It switches to J mode only after that recovery completes, preventing Teach shutdown from stalling at the command-envelope boundary.
 - Before Teach releases the joint brakes, it converts the final leader sample to follower coordinates and preloads that exact pose into the J controller. It enables into the preloaded hold and immediately reaffirms it, preventing the unsupported drop that previously occurred before Safe Bicep recovery began.
+- Before task handoff from a brake-settled pose, the GUI re-enables control, runs the proven Safe Bicep reset, verifies the commanded pose within 0.01 rad, and captures the live encoder values as the follower anchor. This removes the fixed offset between the physically taught path and replay coordinates.
+- After converting a Teach recording to follower coordinates, post-processing appends an exact Safe Bicep endpoint with the gripper fully open at 0.1 m in width mode. Its duration is based on the largest remaining joint error at 0.4 rad/s with a 0.75 second minimum, while the 100 Hz replay interpolation supplies the intermediate arm commands.
 - Build 37 accidentally reused the joint-sample variable while reading gripper channels, producing `joints: ["width", value]`. Those files retain gripper motion but contain no arm trajectory and must be re-recorded with build 38; replay validation reports this explicitly.
 - Require exactly seven finite values in every recorded target.
 - Do not reject or clamp a taught target against the reset and GUI application envelope. If teach mode can record the pose, replay sends that converted pose exactly.

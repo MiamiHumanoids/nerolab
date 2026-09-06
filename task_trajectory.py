@@ -19,8 +19,9 @@ COMMAND_JOINT_LIMITS = [
     (-0.733039, 0.959932),
     (-1.570797, 1.570797),
 ]
-STREAM_INTERVAL_S = 0.02
+STREAM_INTERVAL_S = 0.01
 STREAM_SPEED_RAD_S = 0.4
+GRIPPER_OPEN_WIDTH_M = 0.1
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
 
@@ -128,6 +129,31 @@ def convert_leader_samples(
         converted.append({**sample, "leader_joints": leader_joints, "joints": follower_joints})
     _validate_targets(converted)
     return converted
+
+
+def append_safe_bicep_return(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not samples:
+        return []
+    processed = [{**sample, "joints": list(sample["joints"])} for sample in samples]
+    final = processed[-1]
+    largest_delta = max(
+        abs(target - float(value))
+        for value, target in zip(final["joints"], SAFE_BICEP_JOINTS)
+    )
+    if largest_delta <= 1e-9:
+        final["joints"] = SAFE_BICEP_JOINTS.copy()
+        final["gripper"] = GRIPPER_OPEN_WIDTH_M
+        final["gripper_mode"] = "width"
+        return processed
+    duration = max(0.75, largest_delta / STREAM_SPEED_RAD_S)
+    processed.append({
+        **final,
+        "time": float(final["time"]) + duration,
+        "joints": SAFE_BICEP_JOINTS.copy(),
+        "gripper": GRIPPER_OPEN_WIDTH_M,
+        "gripper_mode": "width",
+    })
+    return processed
 
 
 def prepare_replay_samples(recording: dict[str, Any]) -> list[dict[str, Any]]:

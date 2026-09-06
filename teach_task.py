@@ -13,9 +13,9 @@ import numpy as np
 
 from lerobot_robot_nero import Nero, NeroConfig
 from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
-from task_trajectory import convert_leader_samples, safe_bicep_shutdown
+from task_trajectory import append_safe_bicep_return, convert_leader_samples, safe_bicep_shutdown
 
-FPS = 15
+FPS = 50
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
 
 
@@ -133,7 +133,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     _, gripper_timestamp = read_gripper_state(effector, last_gripper)
     cv2.namedWindow("NERO teach task", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO teach task", 900, 180)
-    print("Teach mode active. Move the robot manually; samples are recorded at 15 FPS.")
+    print(f"Teach mode active. Move the robot manually; samples are recorded at {FPS} FPS.")
     print("Press q in the teach window to save the task.")
 
     shutdown_hold_target: list[float] | None = None
@@ -254,11 +254,13 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         print(f"Replay unavailable: {exc}", flush=True)
         safe_bicep_shutdown(robot, "Teach shutdown")
         return
+    sequence = append_safe_bicep_return(sequence)
     output.write_text(json.dumps({
         "task": task,
         "fps": FPS,
         "joint_space": "follower",
         "follower_anchor": follower_anchor,
+        "safe_bicep_return": True,
         "replay_ready": True,
         "samples": sequence,
     }, indent=2))
