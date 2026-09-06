@@ -4,6 +4,8 @@ from pathlib import Path
 
 from task_trajectory import (
     SAFE_BICEP_JOINTS,
+    command_recorded_gripper,
+    interpolated_joint_trajectory,
     prepare_replay_samples,
 )
 
@@ -75,6 +77,48 @@ class TaskTrajectoryTest(unittest.TestCase):
         })
 
         self.assertEqual(prepared[1]["joints"][5], anchor[5] + 0.973745)
+
+    def test_interpolation_hits_recorded_samples_with_20ms_max_spacing(self):
+        samples = [
+            {"time": 0.0, "joints": [0.0] * 7},
+            {"time": 0.07, "joints": [0.7] * 7},
+            {"time": 0.14, "joints": [0.0] * 7},
+        ]
+
+        points = interpolated_joint_trajectory(samples)
+        original_points = [point for point in points if point[2] is not None]
+
+        self.assertEqual([point[2] for point in original_points], [0, 1, 2])
+        self.assertEqual([point[1] for point in original_points], [sample["joints"] for sample in samples])
+        self.assertTrue(all(
+            following[0] - current[0] <= 0.0200001
+            for current, following in zip(points, points[1:])
+        ))
+
+    def test_gripper_replay_preserves_recorded_control_mode(self):
+        class Effector:
+            def __init__(self):
+                self.calls = []
+
+            def move_gripper_m(self, value, force):
+                self.calls.append(("width", value, force))
+
+            def move_gripper_deg(self, value, force):
+                self.calls.append(("angle", value, force))
+
+        effector = Effector()
+
+        previous = command_recorded_gripper(
+            effector, {"gripper_mode": "angle", "gripper": 17.5}, None
+        )
+        command_recorded_gripper(
+            effector, {"gripper_mode": "width", "gripper": 0.04}, previous
+        )
+
+        self.assertEqual(effector.calls, [
+            ("angle", 17.5, 1.0),
+            ("width", 0.04, 1.0),
+        ])
 
 
 if __name__ == "__main__":

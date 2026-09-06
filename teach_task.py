@@ -19,12 +19,18 @@ FPS = 15
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
 
 
-def read_gripper_width(effector, fallback: float = 0.1) -> float:
+def read_gripper_state(
+    effector, fallback: tuple[str, float] = ("width", 0.1)
+) -> tuple[str, float]:
     try:
         status = effector.get_gripper_status()
-        value = getattr(getattr(status, "msg", status), "value", None)
+        message = getattr(status, "msg", status)
+        value = getattr(message, "value", None)
         if value is not None:
-            return float(np.clip(float(value), 0.0, 0.1))
+            mode = str(getattr(message, "mode", "width"))
+            if mode == "width":
+                return mode, float(np.clip(float(value), 0.0, 0.1))
+            return mode, float(value)
     except Exception:
         pass
     return fallback
@@ -57,7 +63,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     sequence: list[dict[str, object]] = []
     interval = 1.0 / FPS
     next_sample = time.monotonic()
-    last_gripper = 0.1
+    last_gripper = ("width", 0.1)
     cv2.namedWindow("NERO teach task", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO teach task", 900, 180)
     print("Teach mode active. Move the robot manually; samples are recorded at 15 FPS.")
@@ -70,11 +76,12 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
             now = time.monotonic()
             if now >= next_sample:
                 state = [float(value) for value in robot.get_teach_joint_angles()]
-                last_gripper = read_gripper_width(effector, last_gripper)
+                last_gripper = read_gripper_state(effector, last_gripper)
                 sequence.append({
                     "time": time.monotonic(),
                     "joints": state,
-                    "gripper": last_gripper,
+                    "gripper": last_gripper[1],
+                    "gripper_mode": last_gripper[0],
                 })
                 next_sample += interval
                 if next_sample < now:
@@ -82,7 +89,7 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
 
             canvas = np.zeros((180, 900, 3), dtype=np.uint8)
             cv2.putText(canvas, "TEACH MODE - move the robot manually", (24, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(canvas, f"Samples: {len(sequence)}    Gripper: {last_gripper:.3f} m    Press q to save", (24, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 220, 255), 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"Samples: {len(sequence)}    Gripper: {last_gripper[1]:.3f} {last_gripper[0]}    Press q to save", (24, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 220, 255), 1, cv2.LINE_AA)
             cv2.imshow("NERO teach task", canvas)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break

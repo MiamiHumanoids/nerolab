@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 from typing import Any
 
 SAFE_BICEP_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.5]
@@ -11,6 +12,68 @@ STREAM_INTERVAL_S = 0.02
 STREAM_SPEED_RAD_S = 0.4
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
+
+
+def interpolated_joint_trajectory(
+    samples: list[dict[str, Any]], interval: float = STREAM_INTERVAL_S
+) -> list[tuple[float, list[float], int | None]]:
+    points = [(float(samples[0]["time"]), [float(value) for value in samples[0]["joints"]], 0)]
+    for sample_index in range(len(samples) - 1):
+        current = samples[sample_index]
+        following = samples[sample_index + 1]
+        start_time = float(current["time"])
+        end_time = float(following["time"])
+        duration = end_time - start_time
+        if duration <= 0.0:
+            raise ValueError(f"Recorded sample {sample_index + 2} has a non-increasing timestamp.")
+        start = [float(value) for value in current["joints"]]
+        target = [float(value) for value in following["joints"]]
+        step_count = max(1, math.ceil(duration / interval))
+        for step_index in range(1, step_count + 1):
+            fraction = step_index / step_count
+            points.append((
+                start_time + duration * fraction,
+                [value + (goal - value) * fraction for value, goal in zip(start, target)],
+                sample_index + 1 if step_index == step_count else None,
+            ))
+    return points
+
+
+def stream_recorded_trajectory(
+    robot: Any,
+    samples: list[dict[str, Any]],
+    sample_callback: Callable[[dict[str, Any], int], None] | None = None,
+) -> None:
+    points = interpolated_joint_trajectory(samples)
+    started = time.monotonic() - points[0][0]
+    for sample_time, target, sample_index in points:
+        remaining = started + sample_time - time.monotonic()
+        if remaining > 0.0:
+            time.sleep(remaining)
+        robot._arm.move_js(target)
+        if sample_index is not None and sample_callback is not None:
+            sample_callback(samples[sample_index], sample_index)
+
+
+def command_recorded_gripper(
+    effector: Any,
+    sample: dict[str, Any],
+    previous: tuple[str, float] | None,
+) -> tuple[str, float]:
+    mode = str(sample.get("gripper_mode", "width"))
+    value = float(sample.get("gripper", 0.1))
+    threshold = 0.5 if mode == "angle" else 0.0005
+    if previous is not None and mode == previous[0] and abs(value - previous[1]) <= threshold:
+        return previous
+    if mode == "angle":
+        move = getattr(effector, "move_gripper_deg", None)
+        if move is None:
+            raise RuntimeError("Recorded angle-mode gripper motion requires move_gripper_deg")
+    else:
+        move = effector.move_gripper_m
+    move(value=value, force=1.0)
+    print(f"Gripper replay sample: mode={mode} value={value:.6f}")
+    return mode, value
 
 
 def convert_leader_samples(

@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-no-sag-handoff-27`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-faithful-replay-29`.
 
 ## Core Principles
 
@@ -277,8 +277,10 @@ Important replay rules:
 - Do not immediately call `set_teach_mode(False)` on a fresh replay connection; that redundantly invokes follower/reset behavior.
 - Select J mode explicitly before replay.
 - Ease from the current encoder pose to the first recorded target with a bounded 50 Hz `move_js` stream, then verify that pose from encoders.
-- Replay subsequent targets with `move_js` against their absolute recorded timestamps. Do not wait for every 15 FPS sample to settle; that creates stop-and-go motion and destroys the taught timing.
-- Schedule gripper changes on the same recorded timeline.
+- Interpolate between 15 FPS recorded targets and stream `move_js` at 50 Hz against their absolute timestamps. Every original sample remains an exact stream point; the added points prevent coarse steps without changing the taught path or timing.
+- Use 25 percent controller speed only for the eased approach to sample 1, then 100 percent during the timestamped taught trajectory so controller speed limiting does not distort faster manual motion.
+- Keep camera acquisition out of standalone replay's motion scheduler so frame latency cannot delay joint commands.
+- Record gripper feedback with its SDK mode. Width-mode values replay through `move_gripper_m`; angle-mode values replay through `move_gripper_deg` on the same recorded timeline.
 - Require exactly seven finite values in every recorded target.
 - Do not reject or clamp a taught target against the reset and GUI application envelope. If teach mode can record the pose, replay sends that converted pose exactly.
 - During replay-and-record, store measured joints in `observation.state` and taught target joints plus gripper in `action`.
