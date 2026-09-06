@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-clean-task-replay-24`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-full-activity-trace-25`.
 
 ## Core Principles
 
@@ -284,7 +284,7 @@ Important replay rules:
 
 ## Debugging with Activity Trace
 
-Use **Copy Activity Trace to Clipboard** in the persistent bottom footer. It is available on every GUI tab.
+Use **Copy Activity Trace to Clipboard** in the persistent bottom footer. It is available on every GUI tab and copies the complete activity history for the current NERO Lab session, including entries removed from the visible Activity panel by workflow-specific clears.
 
 A useful trace includes:
 

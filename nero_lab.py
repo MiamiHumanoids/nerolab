@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import prepare_replay_samples
 
-APP_BUILD = "2026-09-06-clean-task-replay-24"
+APP_BUILD = "2026-09-06-full-activity-trace-25"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -111,6 +111,7 @@ class NeroLab(tk.Tk):
         self.minsize(1300, 850)
         self.process: subprocess.Popen[str] | None = None
         self.robot: Nero | None = None
+        self.activity_trace: list[str] = []
         self.safe_bicep_position_reached = False
         self.slider_motion_job: str | None = None
         self.gripper_motion_job: str | None = None
@@ -861,8 +862,10 @@ class NeroLab(tk.Tk):
             self.log_message("No inference process is running")
 
     def log_message(self, message: str) -> None:
+        entry = message.rstrip() + "\n"
+        self.activity_trace.append(entry)
         self.log.configure(state="normal")
-        self.log.insert("end", message.rstrip() + "\n")
+        self.log.insert("end", entry)
         self.log.see("end")
         self.log.configure(state="disabled")
         self.status_var.set(message.splitlines()[-1][:140])
@@ -873,11 +876,11 @@ class NeroLab(tk.Tk):
         self.log.configure(state="disabled")
 
     def copy_activity_log(self) -> None:
-        activity = self.log.get("1.0", "end-1c")
+        activity = "".join(self.activity_trace).rstrip("\n")
         self.clipboard_clear()
         self.clipboard_append(activity)
         self.update_idletasks()
-        self.status_var.set("Activity debug info copied to clipboard")
+        self.status_var.set("Full session activity trace copied to clipboard")
 
     def refresh_datasets(self) -> None:
         DATASET_BASE.mkdir(parents=True, exist_ok=True)
