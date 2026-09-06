@@ -258,7 +258,7 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         self.assertEqual(
             [sample["gripper"] for sample in amplified],
-            [0.1, 0.08, 0.0993, 0.0995, 0.0995, 0.0995],
+            [0.1, 0.0, 0.1, 0.1, 0.1, 0.1],
         )
         self.assertEqual(
             [sample["gripper_grasping"] for sample in amplified],
@@ -281,7 +281,7 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         amplified = amplify_gripper_samples(samples)
 
-        self.assertEqual([sample["gripper"] for sample in amplified], [0.04, 0.1])
+        self.assertEqual([sample["gripper"] for sample in amplified], [0.0, 0.1])
         self.assertEqual(
             [sample["gripper_force"] for sample in amplified], [3.0, 3.0]
         )
@@ -298,7 +298,7 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         self.assertEqual(
             [sample["gripper"] for sample in amplified],
-            [sample["gripper"] for sample in samples],
+            [0.0993] * 10 + [0.0] * 10 + [0.1] * 7,
         )
         self.assertTrue(amplified[10]["gripper_grasping"])
         self.assertFalse(amplified[20]["gripper_grasping"])
@@ -316,12 +316,28 @@ class TaskTrajectoryTest(unittest.TestCase):
 
         self.assertEqual(
             [sample["gripper"] for sample in amplified],
-            [sample["gripper"] for sample in samples],
+            [0.0993] * 10 + [0.0] * 10 + [0.1] * 16,
         )
         self.assertTrue(amplified[19]["gripper_grasping"])
         self.assertFalse(amplified[20]["gripper_grasping"])
         self.assertEqual(amplified[19]["gripper_force"], 3.0)
         self.assertEqual(amplified[20]["gripper_force"], 3.0)
+
+    def test_amplified_release_stays_fully_open_until_next_grasp(self):
+        values = [0.1, 0.04] + [0.099] * 6 + [0.097, 0.08]
+        samples = [
+            {"time": index * 0.1, "gripper_mode": "width", "gripper": value}
+            for index, value in enumerate(values)
+        ]
+
+        amplified = amplify_gripper_samples(samples)
+
+        self.assertEqual(
+            [sample["gripper"] for sample in amplified],
+            [0.1, 0.0] + [0.1] * 7 + [0.0],
+        )
+        self.assertFalse(amplified[8]["gripper_grasping"])
+        self.assertTrue(amplified[9]["gripper_grasping"])
 
     def test_amplified_opening_waits_for_recorded_release_pose(self):
         target = [0.0, -1.7594, 0.0, 0.0, 0.0, 0.0, 0.0]

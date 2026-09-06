@@ -132,6 +132,7 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
         open_threshold = GRIPPER_OPEN_THRESHOLD_M
     amplified: list[dict[str, Any]] = []
     closed = False
+    released = False
     opening_started: float | None = None
     opening_start_index: int | None = None
     for sample in samples:
@@ -142,6 +143,7 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
             sample_time = float(sample["time"])
             if not closed and value <= GRIPPER_CLOSE_THRESHOLD_M:
                 closed = True
+                released = False
             if closed:
                 if value >= open_threshold:
                     if opening_started is None:
@@ -151,13 +153,19 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
                         closed = False
                         if opening_start_index is not None:
                             for pending in amplified[opening_start_index:]:
+                                pending["gripper"] = GRIPPER_OPEN_WIDTH_M
                                 pending["gripper_grasping"] = False
                                 pending["gripper_force"] = GRIPPER_REPLAY_FORCE
+                        released = True
                         opening_started = None
                         opening_start_index = None
                 else:
                     opening_started = None
                     opening_start_index = None
+            if released and not closed:
+                processed["gripper"] = GRIPPER_OPEN_WIDTH_M
+            elif closed:
+                processed["gripper"] = 0.0
             processed["gripper_grasping"] = closed
             processed["gripper_force"] = (
                 GRIPPER_GRASP_FORCE if closed else GRIPPER_REPLAY_FORCE
@@ -165,6 +173,7 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
         amplified.append(processed)
     if amplified and str(samples[-1].get("gripper_mode", "width")) == "width":
         if float(samples[-1].get("gripper", GRIPPER_OPEN_WIDTH_M)) >= open_threshold:
+            amplified[-1]["gripper"] = GRIPPER_OPEN_WIDTH_M
             amplified[-1]["gripper_grasping"] = False
             amplified[-1]["gripper_force"] = GRIPPER_REPLAY_FORCE
     return amplified
