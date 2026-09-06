@@ -14,9 +14,9 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
-from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
 
 REPLAY_SPEED_PERCENT = 25
+WAYPOINT_STRIDE = 5
 JOINT_LIMITS = [
     (-2.695261, 2.695261),
     (-1.73533, 1.73533),
@@ -89,20 +89,17 @@ def main(task_file: Path, dataset_root: Path) -> None:
         raise RuntimeError("NERO gripper effector is unavailable")
     if hasattr(effector, "set_gripper_teaching_pendant_param"):
         effector.set_gripper_teaching_pendant_param(max_range_config=0.1, timeout=5.0)
-    robot._arm.set_follower_mode()
-    robot._teach_mode_enabled = False
+    robot.set_teach_mode(False)
     if hasattr(robot._arm, "get_joints_enable_status_list"):
         enabled_joints = robot._arm.get_joints_enable_status_list()
         if not all(enabled_joints):
             raise RuntimeError(f"Replay aborted: arm joints are disabled: {enabled_joints}")
     robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
     robot._arm.set_speed_percent(REPLAY_SPEED_PERCENT)
-    robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=7))
-    time.sleep(0.2)
-    robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=3))
     cv2.namedWindow("NERO replay recording", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO replay recording", 1280, 480)
     print(f"Replaying taught task and recording dataset: {dataset_root}")
+    print(f"Sending recorded joint targets every {WAYPOINT_STRIDE} samples.")
 
     stop_requested = False
     try:
@@ -121,11 +118,15 @@ def main(task_file: Path, dataset_root: Path) -> None:
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
                 effector.move_gripper_m(value=gripper, force=30.0)
                 previous_gripper = gripper
-            target_changed = previous_target is None or any(
-                abs(value - previous) > 0.01
-                for value, previous in zip(target, previous_target)
+            send_waypoint = (
+                index % WAYPOINT_STRIDE == 0
+                or index == len(samples) - 1
             )
-            if target_changed:
+            if send_waypoint and (
+                previous_target is None
+                or any(abs(value - previous) > 0.001 for value, previous in zip(target, previous_target))
+            ):
+                robot._arm.move_j(target)
                 previous_target = target
             duration = float(sample["time"]) - (float(samples[index - 1]["time"]) if index else 0.0)
             deadline = time.monotonic() + max(1.0 / 15.0, duration)
@@ -157,10 +158,6 @@ def main(task_file: Path, dataset_root: Path) -> None:
         print("Replay complete; saving episode.")
     finally:
         cv2.destroyAllWindows()
-        try:
-            robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=6))
-        except Exception:
-            pass
         try:
             robot._arm.set_follower_mode()
             robot._arm.reset()

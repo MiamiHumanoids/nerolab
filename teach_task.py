@@ -15,6 +15,7 @@ from lerobot_robot_nero import Nero, NeroConfig
 from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
 
 FPS = 15
+WAYPOINT_STRIDE = 5
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
 JOINT_LIMITS = [
     (-2.695261, 2.695261),
@@ -124,13 +125,29 @@ def main(task: str, output: Path) -> None:
     while not replay_trigger.exists():
         time.sleep(0.1)
     replay_trigger.unlink(missing_ok=True)
-    print("Executing native taught trajectory.")
-    robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=7))
-    time.sleep(0.2)
-    robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=3))
+    print(f"Replaying recorded joint targets every {WAYPOINT_STRIDE} samples.")
+    robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
+    robot._arm.set_speed_percent(25)
     cv2.namedWindow("NERO task replay", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO task replay", 1280, 480)
+    previous_target: list[float] | None = None
+    previous_gripper = None
     for index, sample in enumerate(sequence):
+        target = [float(value) for value in sample["joints"]]
+        gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
+        if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
+            effector.move_gripper_m(value=gripper, force=30.0)
+            previous_gripper = gripper
+        send_waypoint = (
+            index % WAYPOINT_STRIDE == 0
+            or index == len(sequence) - 1
+        )
+        if send_waypoint and (
+            previous_target is None
+            or any(abs(value - previous) > 0.001 for value, previous in zip(target, previous_target))
+        ):
+            robot._arm.move_j(target)
+            previous_target = target
         deadline = time.monotonic() + max(
             1.0 / FPS,
             float(sample["time"]) - (float(sequence[index - 1]["time"]) if index else 0.0),
@@ -151,7 +168,7 @@ def main(task: str, output: Path) -> None:
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 frames.append(frame)
             combined = np.hstack(frames)
-            cv2.putText(combined, "Native replay - q: stop", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(combined, "Joint replay - q: stop", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
             cv2.imshow("NERO task replay", combined)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 replay_trigger = None
@@ -160,10 +177,6 @@ def main(task: str, output: Path) -> None:
         if replay_trigger is None:
             break
     cv2.destroyAllWindows()
-    try:
-        robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=6))
-    except Exception:
-        pass
     try:
         robot.set_teach_mode(False)
     except Exception:
