@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-smooth-stream-18"
+APP_BUILD = "2026-09-06-auto-nudge-19"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -496,15 +496,18 @@ class NeroLab(tk.Tk):
             self.set_motion_mode_and_wait(
                 robot, robot._arm.OPTIONS.MOTION_MODE.P, "MOVE_P", f"{label} P recovery"
             )
-            for attempt in range(1, 4):
+            recovery_nudges = ((1, 0.12), (3, 0.12))
+            next_nudge = 0
+            for attempt in range(1, 5):
                 start = [float(value) for value in robot.get_joint_angles()]
                 move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
                 self.log_message(
-                    f"COMMAND {label} P recovery {attempt}/3 move_p={move_result!r} "
+                    f"COMMAND {label} P recovery {attempt}/4 move_p={move_result!r} "
                     f"target={CONTROL_PRIME_POSE}"
                 )
                 moved = False
                 saw_in_progress = False
+                did_not_start = False
                 started_at = time.monotonic()
                 deadline = started_at + 10.0
                 while time.monotonic() < deadline:
@@ -527,18 +530,52 @@ class NeroLab(tk.Tk):
                         break
                     if not moved and time.monotonic() - started_at >= 1.5:
                         self.log_message(
-                            f"DEBUG {label} P recovery {attempt}/3 did not start within 1.5s; retrying"
+                            f"DEBUG {label} P recovery {attempt}/4 did not start within 1.5s"
                         )
+                        did_not_start = True
                         break
                     time.sleep(0.05)
                 else:
                     progress = "partial encoder movement" if moved else "no encoder movement"
                     self.log_message(
-                        f"DEBUG {label} P recovery {attempt}/3 ended with {progress}; retrying"
+                        f"DEBUG {label} P recovery {attempt}/4 ended with {progress}; retrying"
                     )
                     continue
                 if moved and saw_in_progress and "NORMAL" in arm_status and "SUCCESSFULLY" in motion_status:
                     break
+                if did_not_start and not outside_limits and next_nudge < len(recovery_nudges):
+                    joint_index, offset = recovery_nudges[next_nudge]
+                    next_nudge += 1
+                    self.set_motion_mode_and_wait(
+                        robot,
+                        robot._arm.OPTIONS.MOTION_MODE.J,
+                        "MOVE_J",
+                        f"{label} recovery nudge",
+                    )
+                    nudge_target = [float(value) for value in robot.get_joint_angles()]
+                    lower, upper = COMMAND_JOINT_LIMITS[joint_index]
+                    nudge_target[joint_index] = min(
+                        max(nudge_target[joint_index] + offset, lower + RESET_LIMIT_MARGIN),
+                        upper - RESET_LIMIT_MARGIN,
+                    )
+                    nudge_result = robot._arm.move_j(nudge_target)
+                    self.log_message(
+                        f"COMMAND {label} recovery nudge joint={joint_index + 1} "
+                        f"move_j={nudge_result!r} target={nudge_target[joint_index]:.3f}"
+                    )
+                    self.wait_for_joint_target(
+                        robot,
+                        nudge_target,
+                        f"{label} recovery nudge joint {joint_index + 1}",
+                        timeout=4.0,
+                        tolerance=0.01,
+                    )
+                    self.set_motion_mode_and_wait(
+                        robot,
+                        robot._arm.OPTIONS.MOTION_MODE.P,
+                        "MOVE_P",
+                        f"{label} resume P recovery",
+                    )
             else:
                 raise RuntimeError(
                     f"{label} clean-connect P recovery did not complete: {self.arm_debug_text(robot)}"
