@@ -18,6 +18,7 @@ from task_trajectory import (
     GRIPPER_REPLAY_FORCE,
     amplify_gripper_samples,
     is_amplified_gripper_opening,
+    prepare_gripper_for_replay,
     prepare_replay_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
@@ -86,8 +87,7 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
     effector = robot._get_gripper_effector()
     if effector is None:
         raise RuntimeError("NERO gripper effector is unavailable")
-    if hasattr(effector, "set_gripper_teaching_pendant_param"):
-        effector.set_gripper_teaching_pendant_param(max_range_config=0.1, timeout=5.0)
+    prepare_gripper_for_replay(effector)
     if hasattr(robot._arm, "get_joints_enable_status_list"):
         enabled_joints = robot._arm.get_joints_enable_status_list()
         if not all(enabled_joints):
@@ -119,6 +119,10 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
                 replay_started += time.monotonic() - pause_started
             if previous_gripper is None or abs(gripper - previous_gripper[1]) > 0.002:
                 effector.move_gripper_m(value=gripper, force=GRIPPER_REPLAY_FORCE)
+                print(
+                    f"Gripper replay recording command: value={gripper:.6f} "
+                    f"force={GRIPPER_REPLAY_FORCE:.1f}"
+                )
                 previous_gripper = (mode, gripper)
             obs = robot.get_observation()
             state = np.asarray(obs["observation.state"], dtype=np.float32)

@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-pose-gated-release-48`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-near-safe-p-recovery-52`.
 
 ## Core Principles
 
@@ -43,11 +43,7 @@ This is the preferred supported shutdown and recovery pose.
 
 ### Cartesian recovery pose
 
-```python
-CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
-```
-
-This pose is used only to escape a singular or out-of-limit joint state. It is not the final reset target.
+The Cartesian recovery target is computed with `arm.fk(SAFE_BICEP_RESET_JOINTS)`, producing the flange pose of Safe Bicep in the SDK's own NERO kinematic model. This lets P recovery move directly near the final reset pose before J control performs the encoder-exact correction. The former `[-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]` recovery pose remains only as a compatibility fallback when SDK forward kinematics is unavailable or invalid.
 
 ### Reset and GUI command envelope
 
@@ -294,8 +290,9 @@ Important replay rules:
 - Follower-anchor values are passed to the Teach subprocess as fixed-point decimals. Negative near-zero encoder readings therefore remain float arguments instead of being mistaken for command-line options due to scientific notation.
 - After converting a Teach recording to follower coordinates, post-processing appends an exact Safe Bicep endpoint with the gripper fully open at 0.1 m in width mode. Its duration is based on the largest remaining joint error at 0.4 rad/s with a 0.75 second minimum, while the 100 Hz replay interpolation supplies the intermediate arm commands.
 - Taught-task replay commands the gripper with force 30.0 in both normal Replay and Replay-and-Record flows.
-- The GUI enables `Amplify gripper during replay` by default for both replay flows. In amplified width mode the gripper is binary: a taught width at or below 0.085 m commands fully closed at 0.0 m, and it remains closed until the taught width stays at or above 0.098 m for 0.45 seconds, when it commands fully open at 0.1 m. This confirmation delay prevents intermediate commands and shifts release toward the completed return pose. Angle-mode recordings retain their taught values because their open range is not reliably encoded; all modes use force 30.0.
-- Before an amplified opening command, replay repeatedly holds the matching recorded arm pose until joints 1-4 are within 0.03 rad and wrist joints 5-7 are within 0.02 rad. It then opens and extends the remaining replay timeline by the settling delay. If the pose is not reached within five seconds, replay aborts without opening the gripper. This applies to both normal Replay and Replay-and-Record.
+- The GUI enables `Amplify gripper during replay` by default for both replay flows. In amplified width mode the gripper is binary: a taught width at or below 0.085 m commands fully closed at 0.0 m. Reopening requires the taught width to remain near fully open for 0.45 seconds. The threshold is the stricter of the recording's calibrated 99th-percentile open reference minus 0.1 mm and the nominal 0.0994 m limit, so recordings whose sensor plateaus slightly below 0.1 m still release only at their demonstrated fully-open state. Angle-mode recordings retain their taught values because their open range is not reliably encoded; all modes use force 30.0.
+- Before an amplified opening command, replay repeatedly holds the matching recorded arm pose until joints 1-4 are within 0.01 rad and wrist joints 5-7 are within 0.005 rad. It then opens and extends the remaining replay timeline by the settling delay. If the pose is not reached within five seconds, replay aborts without opening the gripper. This applies to both normal Replay and Replay-and-Record.
+- Every replay process resets stale gripper control state with `disable_gripper()` before configuring the 0.1 m pendant range. This matches the proven standalone gripper sequence and makes saved tasks replay their gripper after reconnecting in a later application session. Both replay modes log configuration and gripper command values.
 - Build 37 accidentally reused the joint-sample variable while reading gripper channels, producing `joints: ["width", value]`. Those files retain gripper motion but contain no arm trajectory and must be re-recorded with build 38; replay validation reports this explicitly.
 - Require exactly seven finite values in every recorded target.
 - Do not reject or clamp a taught target against the reset and GUI application envelope. If teach mode can record the pose, replay sends that converted pose exactly.

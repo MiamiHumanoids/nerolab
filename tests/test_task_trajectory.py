@@ -14,14 +14,29 @@ from task_trajectory import (
     interpolated_joint_trajectory,
     is_amplified_gripper_opening,
     is_safe_bicep_pose,
+    prepare_gripper_for_replay,
     prepare_replay_samples,
     safe_bicep_shutdown,
+    safe_bicep_recovery_pose,
     smooth_move_with_recovery,
     wait_for_gripper_release_pose,
 )
 
 
 class TaskTrajectoryTest(unittest.TestCase):
+    def test_safe_bicep_recovery_pose_uses_sdk_forward_kinematics(self):
+        expected_pose = [-0.2, 0.0, 0.35, -1.4, 0.0, -3.0]
+
+        class Arm:
+            def fk(self, joints):
+                self.joints = joints
+                return expected_pose
+
+        arm = Arm()
+
+        self.assertEqual(safe_bicep_recovery_pose(arm), expected_pose)
+        self.assertEqual(arm.joints, SAFE_BICEP_JOINTS)
+
     def test_negative_near_zero_anchor_is_accepted_by_argparse(self):
         parser = argparse.ArgumentParser()
         parser.add_argument("--follower-anchor", type=float, nargs=7, required=True)
@@ -192,22 +207,44 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("width", 0.04, 30.0),
         ])
 
+    def test_gripper_replay_resets_control_before_configuring_range(self):
+        events = []
+
+        class Effector:
+            def disable_gripper(self):
+                events.append(("disable",))
+
+            def set_gripper_teaching_pendant_param(self, **kwargs):
+                events.append(("configure", kwargs))
+                return True
+
+        prepare_gripper_for_replay(Effector())
+
+        self.assertEqual(events, [
+            ("disable",),
+            ("configure", {"max_range_config": 0.1, "timeout": 5.0}),
+        ])
+
     def test_amplified_gripper_is_binary_with_delayed_opening(self):
         samples = [
             {"time": 0.0, "gripper_mode": "width", "gripper": 0.1},
             {"time": 0.1, "gripper_mode": "width", "gripper": 0.08},
-            {"time": 0.2, "gripper_mode": "width", "gripper": 0.099},
-            {"time": 0.5, "gripper_mode": "width", "gripper": 0.099},
-            {"time": 0.66, "gripper_mode": "width", "gripper": 0.099},
+            {"time": 0.2, "gripper_mode": "width", "gripper": 0.0993},
+            {"time": 0.5, "gripper_mode": "width", "gripper": 0.0995},
+            {"time": 0.8, "gripper_mode": "width", "gripper": 0.0995},
+            {"time": 0.96, "gripper_mode": "width", "gripper": 0.0995},
         ]
 
         amplified = amplify_gripper_samples(samples)
 
         self.assertEqual(
             [sample["gripper"] for sample in amplified],
-            [0.1, 0.0, 0.0, 0.0, 0.1],
+            [0.1, 0.0, 0.0, 0.0, 0.0, 0.1],
         )
-        self.assertEqual([sample["gripper"] for sample in samples], [0.1, 0.08, 0.099, 0.099, 0.099])
+        self.assertEqual(
+            [sample["gripper"] for sample in samples],
+            [0.1, 0.08, 0.0993, 0.0995, 0.0995, 0.0995],
+        )
 
     def test_amplified_gripper_preserves_terminal_open_command(self):
         samples = [
@@ -218,6 +255,20 @@ class TaskTrajectoryTest(unittest.TestCase):
         amplified = amplify_gripper_samples(samples)
 
         self.assertEqual([sample["gripper"] for sample in amplified], [0.0, 0.1])
+
+    def test_amplified_gripper_recognizes_calibrated_open_plateau(self):
+        samples = [
+            {"time": index * 0.1, "gripper_mode": "width", "gripper": value}
+            for index, value in enumerate(
+                [0.0993] * 10 + [0.06] * 10 + [0.0993] * 6 + [0.1]
+            )
+        ]
+
+        amplified = amplify_gripper_samples(samples)
+
+        self.assertEqual(amplified[10]["gripper"], 0.0)
+        self.assertEqual(amplified[24]["gripper"], 0.0)
+        self.assertEqual(amplified[25]["gripper"], 0.1)
 
     def test_amplified_opening_waits_for_recorded_release_pose(self):
         target = [0.0] * 7
@@ -233,8 +284,8 @@ class TaskTrajectoryTest(unittest.TestCase):
             def __init__(self):
                 self._arm = Arm()
                 self.positions = [
-                    [0.04, 0.0, 0.0, 0.0, 0.0, 0.03, 0.0],
                     [0.02, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0],
+                    [0.009, 0.0, 0.0, 0.0, 0.0, 0.004, 0.0],
                 ]
 
             def get_joint_angles(self):

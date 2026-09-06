@@ -24,12 +24,12 @@ from task_trajectory import (
     format_cli_float,
     is_safe_bicep_pose,
     prepare_replay_samples,
+    safe_bicep_recovery_pose,
 )
 
-APP_BUILD = "2026-09-06-pose-gated-release-48"
+APP_BUILD = "2026-09-06-near-safe-p-recovery-52"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
-CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
 UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = SAFE_BICEP_JOINTS.copy()
 RESET_SPEED_PERCENT = 25
@@ -517,14 +517,18 @@ class NeroLab(tk.Tk):
             self.set_motion_mode_and_wait(
                 robot, robot._arm.OPTIONS.MOTION_MODE.P, "MOVE_P", f"{label} P recovery"
             )
+            recovery_pose = safe_bicep_recovery_pose(robot._arm)
+            self.log_message(
+                f"DEBUG {label} Safe Bicep Cartesian recovery target={recovery_pose}"
+            )
             recovery_nudges = ((1, 0.12), (3, 0.12))
             next_nudge = 0
             for attempt in range(1, 5):
                 start = [float(value) for value in robot.get_joint_angles()]
-                move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
+                move_result = robot._arm.move_p(recovery_pose.copy())
                 self.log_message(
                     f"COMMAND {label} P recovery {attempt}/4 move_p={move_result!r} "
-                    f"target={CONTROL_PRIME_POSE}"
+                    f"target={recovery_pose}"
                 )
                 moved = False
                 saw_in_progress = False

@@ -9,7 +9,7 @@ from typing import Any
 
 SAFE_BICEP_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.5]
 SAFE_BICEP_BRAKED_JOINTS = [0.0, -1.7655, 0.023, 2.1964, -0.026, 0.0765, 1.6895]
-CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
+LEGACY_CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
     (-1.74533, 1.74533),
@@ -24,10 +24,11 @@ STREAM_SPEED_RAD_S = 0.4
 GRIPPER_OPEN_WIDTH_M = 0.1
 GRIPPER_REPLAY_FORCE = 30.0
 GRIPPER_CLOSE_THRESHOLD_M = 0.085
-GRIPPER_OPEN_THRESHOLD_M = 0.098
+GRIPPER_OPEN_THRESHOLD_M = 0.0994
+GRIPPER_OPEN_REFERENCE_TOLERANCE_M = 0.0001
 GRIPPER_OPEN_CONFIRMATION_S = 0.45
-GRIPPER_RELEASE_TOLERANCE_RAD = 0.03
-GRIPPER_RELEASE_WRIST_TOLERANCE_RAD = 0.02
+GRIPPER_RELEASE_TOLERANCE_RAD = 0.01
+GRIPPER_RELEASE_WRIST_TOLERANCE_RAD = 0.005
 GRIPPER_RELEASE_TIMEOUT_S = 5.0
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
@@ -35,6 +36,19 @@ TARGET_TIMEOUT_S = 5.0
 
 def format_cli_float(value: float) -> str:
     return format(float(value), ".17f")
+
+
+def safe_bicep_recovery_pose(arm: Any) -> list[float]:
+    fk = getattr(arm, "fk", None)
+    if fk is None:
+        return LEGACY_CONTROL_PRIME_POSE.copy()
+    try:
+        pose = [float(value) for value in fk(SAFE_BICEP_JOINTS.copy())]
+    except (TypeError, ValueError):
+        return LEGACY_CONTROL_PRIME_POSE.copy()
+    if len(pose) != 6 or not all(math.isfinite(value) for value in pose):
+        return LEGACY_CONTROL_PRIME_POSE.copy()
+    return pose
 
 
 def is_safe_bicep_pose(
@@ -98,6 +112,23 @@ def stream_recorded_trajectory(
 
 
 def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    recorded_widths = sorted(
+        float(sample.get("gripper", GRIPPER_OPEN_WIDTH_M))
+        for sample in samples[:-1]
+        if str(sample.get("gripper_mode", "width")) == "width"
+    )
+    if recorded_widths:
+        reference_index = int(0.99 * (len(recorded_widths) - 1))
+        recorded_open_reference = recorded_widths[reference_index]
+        open_threshold = min(
+            GRIPPER_OPEN_THRESHOLD_M,
+            max(
+                GRIPPER_CLOSE_THRESHOLD_M,
+                recorded_open_reference - GRIPPER_OPEN_REFERENCE_TOLERANCE_M,
+            ),
+        )
+    else:
+        open_threshold = GRIPPER_OPEN_THRESHOLD_M
     amplified: list[dict[str, Any]] = []
     closed = False
     opening_started: float | None = None
@@ -110,7 +141,7 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
             if not closed and value <= GRIPPER_CLOSE_THRESHOLD_M:
                 closed = True
             if closed:
-                if value >= GRIPPER_OPEN_THRESHOLD_M:
+                if value >= open_threshold:
                     if opening_started is None:
                         opening_started = sample_time
                     elif sample_time - opening_started >= GRIPPER_OPEN_CONFIRMATION_S:
@@ -121,7 +152,7 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
             processed["gripper"] = 0.0 if closed else GRIPPER_OPEN_WIDTH_M
         amplified.append(processed)
     if amplified and str(samples[-1].get("gripper_mode", "width")) == "width":
-        if float(samples[-1].get("gripper", GRIPPER_OPEN_WIDTH_M)) >= GRIPPER_OPEN_THRESHOLD_M:
+        if float(samples[-1].get("gripper", GRIPPER_OPEN_WIDTH_M)) >= open_threshold:
             amplified[-1]["gripper"] = GRIPPER_OPEN_WIDTH_M
     return amplified
 
@@ -157,6 +188,20 @@ def wait_for_gripper_release_pose(robot: Any, target: list[float], label: str) -
     raise RuntimeError(
         f"{label}: release pose not reached in {GRIPPER_RELEASE_TIMEOUT_S:.1f}s; "
         f"gripper remains closed. target={target} current={robot.get_joint_angles()}"
+    )
+
+
+def prepare_gripper_for_replay(effector: Any) -> None:
+    disable = getattr(effector, "disable_gripper", None)
+    if disable is not None:
+        disable()
+    configure = getattr(effector, "set_gripper_teaching_pendant_param", None)
+    if configure is None:
+        raise RuntimeError("NERO gripper does not support replay range configuration")
+    configured = configure(max_range_config=GRIPPER_OPEN_WIDTH_M, timeout=5.0)
+    print(
+        "Gripper replay control reset; "
+        f"range={GRIPPER_OPEN_WIDTH_M:.3f} m acknowledged={configured}."
     )
 
 
@@ -302,10 +347,12 @@ def prepare_safe_bicep_motion(robot: Any, label: str) -> None:
         print(f"{label}: running P-to-J recovery because {reason}.", flush=True)
         robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
         time.sleep(0.2)
+        recovery_pose = safe_bicep_recovery_pose(robot._arm)
+        print(f"{label}: Safe Bicep Cartesian recovery target={recovery_pose}.", flush=True)
         recovered = False
         for attempt in range(1, 5):
             start = [float(value) for value in robot.get_joint_angles()]
-            robot._arm.move_p(CONTROL_PRIME_POSE)
+            robot._arm.move_p(recovery_pose.copy())
             moved = False
             saw_in_progress = False
             started_at = time.monotonic()
