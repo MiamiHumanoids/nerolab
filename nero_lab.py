@@ -20,11 +20,11 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-control-debug-5"
+APP_BUILD = "2026-09-06-control-debug-6"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
-UPRIGHT_RESET_JOINTS = [0.0, -0.2, 0.0, 0.4, 0.0, 0.2, 0.0]
+UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
@@ -657,7 +657,7 @@ class NeroLab(tk.Tk):
         early_snapshot_logged = False
         while time.monotonic() < deadline:
             current = robot.get_joint_angles()
-            if all(abs(float(value) - goal) <= 0.01 for value, goal in zip(current, target)):
+            if all(abs(float(value) - goal) <= 0.002 for value, goal in zip(current, target)):
                 return
             if not early_snapshot_logged and time.monotonic() - start >= 0.25:
                 self.log_arm_debug(f"{label} 250ms after move_j")
