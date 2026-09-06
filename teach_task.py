@@ -106,7 +106,9 @@ def main(task: str, output: Path) -> None:
             robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=2))
         except Exception:
             pass
-        cv2.destroyAllWindows()
+        finally:
+            robot.set_teach_mode(False)
+            cv2.destroyAllWindows()
 
     if len(sequence) < 2:
         raise RuntimeError("Teach task was too short; record at least two samples.")

@@ -180,12 +180,18 @@ class Nero(Robot):
                 self._arm.set_normal_mode()
             else:
                 raise AttributeError("Nero robot does not expose a non-teach mode API")
-                if hasattr(self._arm, "reset"):
-                    self._arm.reset()
-                if hasattr(self._arm, "enable"):
-                    if not self._arm.enable():
-                        raise RuntimeError("NERO arm joints did not re-enable after leaving Teach mode")
-                self._teach_mode_enabled = False
+            if hasattr(self._arm, "reset"):
+                self._arm.reset()
+            if hasattr(self._arm, "enable"):
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    if self._arm.enable():
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("NERO arm joints did not re-enable after leaving Teach mode")
+            self.configure()
+            self._teach_mode_enabled = False
 
     def get_joint_angles(self) -> list[float]:
         if self._arm is None:

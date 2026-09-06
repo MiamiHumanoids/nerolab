@@ -43,6 +43,7 @@ def test_teach_mode_helpers_expose_sdk_methods():
     class DummyArm:
         def __init__(self):
             self.mode = "idle"
+            self.events = []
 
         def is_connected(self):
             return True
@@ -52,9 +53,17 @@ def test_teach_mode_helpers_expose_sdk_methods():
 
         def set_follower_mode(self):
             self.mode = "follower"
+            self.events.append("follower")
 
         def set_normal_mode(self):
             self.mode = "normal"
+
+        def reset(self):
+            self.events.append("reset")
+
+        def enable(self):
+            self.events.append("enable")
+            return True
 
         def get_leader_joint_angles(self):
             return [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
@@ -66,7 +75,9 @@ def test_teach_mode_helpers_expose_sdk_methods():
     assert robot.get_teach_joint_angles() == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
 
     robot.set_teach_mode(False)
-    assert robot._arm.mode == "normal"
+    assert robot._arm.mode == "follower"
+    assert robot._arm.events == ["follower", "reset", "enable"]
+    assert robot._teach_mode_enabled is False
 
 
 def test_get_joint_angles_wrapper_returns_underlying_arm_values():
