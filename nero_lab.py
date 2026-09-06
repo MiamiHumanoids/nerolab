@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-global-copy-16"
+APP_BUILD = "2026-09-06-outside-limit-recovery-17"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -489,8 +489,10 @@ class NeroLab(tk.Tk):
         status = robot.get_arm_status()
         message = getattr(status, "msg", status)
         arm_status = str(getattr(message, "arm_status", ""))
-        if "NO_SOLUTION" in arm_status or "SINGULARITY" in arm_status:
-            self.log_message(f"DEBUG {label} running clean-connect P-to-J recovery")
+        outside_limits = self.joints_outside_command_limits(robot)
+        if "NO_SOLUTION" in arm_status or "SINGULARITY" in arm_status or outside_limits:
+            reason = "current joints outside command limits" if outside_limits else arm_status
+            self.log_message(f"DEBUG {label} running P-to-J recovery because {reason}")
             self.set_motion_mode_and_wait(
                 robot, robot._arm.OPTIONS.MOTION_MODE.P, "MOVE_P", f"{label} P recovery"
             )
@@ -502,6 +504,7 @@ class NeroLab(tk.Tk):
                     f"target={CONTROL_PRIME_POSE}"
                 )
                 moved = False
+                saw_in_progress = False
                 deadline = time.monotonic() + 8.0
                 while time.monotonic() < deadline:
                     current = [float(value) for value in robot.get_joint_angles()]
@@ -512,7 +515,13 @@ class NeroLab(tk.Tk):
                     message = getattr(status, "msg", status)
                     arm_status = str(getattr(message, "arm_status", ""))
                     motion_status = str(getattr(message, "motion_status", ""))
-                    if moved and "NORMAL" in arm_status and "SUCCESSFULLY" in motion_status:
+                    saw_in_progress = saw_in_progress or "FAILED" in motion_status
+                    if (
+                        moved
+                        and saw_in_progress
+                        and "NORMAL" in arm_status
+                        and "SUCCESSFULLY" in motion_status
+                    ):
                         self.log_arm_debug(f"{label} P recovery completed")
                         break
                     time.sleep(0.05)
