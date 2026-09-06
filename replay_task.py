@@ -12,10 +12,12 @@ from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
     amplify_gripper_samples,
     command_recorded_gripper,
+    is_amplified_gripper_opening,
     prepare_replay_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
     stream_recorded_trajectory,
+    wait_for_gripper_release_pose,
 )
 
 REPLAY_SPEED_PERCENT = 25
@@ -83,11 +85,19 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
         )
         robot._arm.set_speed_percent(TRAJECTORY_SPEED_PERCENT)
         print(f"Recorded trajectory speed set to {TRAJECTORY_SPEED_PERCENT}%.")
-        def apply_sample(sample: dict[str, object], index: int) -> None:
+        def apply_sample(sample: dict[str, object], index: int) -> float:
             nonlocal previous_gripper
+            timeline_pause = 0.0
+            if amplified_gripper and is_amplified_gripper_opening(sample, previous_gripper):
+                timeline_pause = wait_for_gripper_release_pose(
+                    robot,
+                    [float(value) for value in sample["joints"]],
+                    "Task replay",
+                )
             previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")
+            return timeline_pause
         stream_recorded_trajectory(robot, samples, apply_sample)
         final_target = [float(value) for value in samples[-1]["joints"]]
         final_joints = [float(value) for value in robot.get_joint_angles()]

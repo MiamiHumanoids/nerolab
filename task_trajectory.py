@@ -26,6 +26,9 @@ GRIPPER_REPLAY_FORCE = 30.0
 GRIPPER_CLOSE_THRESHOLD_M = 0.085
 GRIPPER_OPEN_THRESHOLD_M = 0.098
 GRIPPER_OPEN_CONFIRMATION_S = 0.45
+GRIPPER_RELEASE_TOLERANCE_RAD = 0.03
+GRIPPER_RELEASE_WRIST_TOLERANCE_RAD = 0.02
+GRIPPER_RELEASE_TIMEOUT_S = 5.0
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
 
@@ -79,7 +82,7 @@ def interpolated_joint_trajectory(
 def stream_recorded_trajectory(
     robot: Any,
     samples: list[dict[str, Any]],
-    sample_callback: Callable[[dict[str, Any], int], None] | None = None,
+    sample_callback: Callable[[dict[str, Any], int], float | None] | None = None,
 ) -> None:
     points = interpolated_joint_trajectory(samples)
     started = time.monotonic() - points[0][0]
@@ -89,7 +92,9 @@ def stream_recorded_trajectory(
             time.sleep(remaining)
         robot._arm.move_js(target)
         if sample_index is not None and sample_callback is not None:
-            sample_callback(samples[sample_index], sample_index)
+            timeline_pause = sample_callback(samples[sample_index], sample_index)
+            if timeline_pause:
+                started += timeline_pause
 
 
 def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -119,6 +124,40 @@ def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any
         if float(samples[-1].get("gripper", GRIPPER_OPEN_WIDTH_M)) >= GRIPPER_OPEN_THRESHOLD_M:
             amplified[-1]["gripper"] = GRIPPER_OPEN_WIDTH_M
     return amplified
+
+
+def is_amplified_gripper_opening(
+    sample: dict[str, Any], previous: tuple[str, float] | None
+) -> bool:
+    return (
+        previous == ("width", 0.0)
+        and str(sample.get("gripper_mode", "width")) == "width"
+        and float(sample.get("gripper", 0.0)) == GRIPPER_OPEN_WIDTH_M
+    )
+
+
+def wait_for_gripper_release_pose(robot: Any, target: list[float], label: str) -> float:
+    started = time.monotonic()
+    deadline = started + GRIPPER_RELEASE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        current = [float(value) for value in robot.get_joint_angles()]
+        errors = [abs(value - goal) for value, goal in zip(current, target)]
+        if (
+            max(errors[:4], default=0.0) <= GRIPPER_RELEASE_TOLERANCE_RAD
+            and max(errors[4:], default=0.0) <= GRIPPER_RELEASE_WRIST_TOLERANCE_RAD
+        ):
+            elapsed = time.monotonic() - started
+            print(
+                f"{label}: release pose reached after {elapsed:.3f}s; "
+                f"max_error={max(errors):.6f} rad."
+            )
+            return elapsed
+        robot._arm.move_js(target)
+        time.sleep(STREAM_INTERVAL_S)
+    raise RuntimeError(
+        f"{label}: release pose not reached in {GRIPPER_RELEASE_TIMEOUT_S:.1f}s; "
+        f"gripper remains closed. target={target} current={robot.get_joint_angles()}"
+    )
 
 
 def command_recorded_gripper(

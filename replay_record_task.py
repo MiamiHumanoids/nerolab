@@ -17,9 +17,11 @@ from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
     GRIPPER_REPLAY_FORCE,
     amplify_gripper_samples,
+    is_amplified_gripper_opening,
     prepare_replay_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
+    wait_for_gripper_release_pose,
 )
 
 REPLAY_SPEED_PERCENT = 25
@@ -110,10 +112,14 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
             target = [float(value) for value in sample["joints"]]
             mode = str(sample.get("gripper_mode", "width"))
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
+            robot._arm.move_js(target)
+            if amplified_gripper and is_amplified_gripper_opening(sample, previous_gripper):
+                pause_started = time.monotonic()
+                wait_for_gripper_release_pose(robot, target, "Replay recording")
+                replay_started += time.monotonic() - pause_started
             if previous_gripper is None or abs(gripper - previous_gripper[1]) > 0.002:
                 effector.move_gripper_m(value=gripper, force=GRIPPER_REPLAY_FORCE)
                 previous_gripper = (mode, gripper)
-            robot._arm.move_js(target)
             obs = robot.get_observation()
             state = np.asarray(obs["observation.state"], dtype=np.float32)
             wrist = rgb_image(obs.get("observation.images.wrist"), "wrist")

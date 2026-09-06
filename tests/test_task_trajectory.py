@@ -12,10 +12,12 @@ from task_trajectory import (
     command_recorded_gripper,
     format_cli_float,
     interpolated_joint_trajectory,
+    is_amplified_gripper_opening,
     is_safe_bicep_pose,
     prepare_replay_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
+    wait_for_gripper_release_pose,
 )
 
 
@@ -216,6 +218,36 @@ class TaskTrajectoryTest(unittest.TestCase):
         amplified = amplify_gripper_samples(samples)
 
         self.assertEqual([sample["gripper"] for sample in amplified], [0.0, 0.1])
+
+    def test_amplified_opening_waits_for_recorded_release_pose(self):
+        target = [0.0] * 7
+
+        class Arm:
+            def __init__(self):
+                self.targets = []
+
+            def move_js(self, value):
+                self.targets.append(value)
+
+        class Robot:
+            def __init__(self):
+                self._arm = Arm()
+                self.positions = [
+                    [0.04, 0.0, 0.0, 0.0, 0.0, 0.03, 0.0],
+                    [0.02, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0],
+                ]
+
+            def get_joint_angles(self):
+                return self.positions.pop(0)
+
+        robot = Robot()
+        with patch("task_trajectory.time.sleep"):
+            wait_for_gripper_release_pose(robot, target, "Test")
+
+        self.assertEqual(robot._arm.targets, [target])
+        self.assertTrue(is_amplified_gripper_opening(
+            {"gripper_mode": "width", "gripper": 0.1}, ("width", 0.0)
+        ))
 
     def test_safe_shutdown_moves_brakes_then_disconnects(self):
         events = []
