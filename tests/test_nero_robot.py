@@ -124,7 +124,7 @@ def test_task_handoff_disconnect_can_preserve_enabled_motors():
     assert robot._arm is None
 
 
-def test_engage_brakes_waits_for_emergency_stop_to_latch():
+def test_engage_brakes_waits_for_emergency_stop_and_rest():
     cfg = NeroConfig(id="test-arm", can_channel="can0")
     robot = Nero(cfg)
 
@@ -138,16 +138,22 @@ def test_engage_brakes_waits_for_emergency_stop_to_latch():
         def electronic_emergency_stop(self):
             self.events.append("emergency_stop")
 
-        def get_joints_enable_status_list(self):
-            return [False] * 7
+        def get_arm_status(self):
+            class Message:
+                arm_status = "EMERGENCY_STOP"
 
-        def disable(self):
-            self.events.append("disable")
+            class Status:
+                msg = Message()
+
+            return Status()
+
+        def get_joint_angles(self):
+            return [0.0] * 7
 
     dummy = DummyArm()
     robot._arm = dummy
 
-    robot.engage_brakes()
+    robot.engage_brakes(settle_time=0.0, sample_interval=0.0)
 
     assert dummy.events == ["emergency_stop"]
 

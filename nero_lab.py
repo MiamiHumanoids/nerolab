@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import prepare_replay_samples
 
-APP_BUILD = "2026-09-06-safe-teach-shutdown-32"
+APP_BUILD = "2026-09-06-smooth-brake-settle-33"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -367,7 +367,7 @@ class NeroLab(tk.Tk):
             if emergency_brake:
                 try:
                     self.robot.engage_brakes()
-                    self.log_message("All joint brakes verified before disconnect")
+                    self.log_message("Emergency-stop resting pose settled before disconnect")
                 except Exception as exc:
                     self.log_message(f"Emergency brake before disconnect failed: {exc}")
                     return
@@ -625,7 +625,7 @@ class NeroLab(tk.Tk):
         try:
             robot.engage_brakes()
             self.set_arm_status_display("Arm status: EMERGENCY STOP | Click Re-enable Arm to release motor brakes", color="#008000")
-            self.log_message("Emergency brake activated; all joint brakes verified")
+            self.log_message("Emergency brake activated; resting pose settled")
         except Exception as exc:
             self.set_arm_status_display(f"Emergency brake error: {exc}")
             self.log_message(f"Emergency brake failed: {exc}")

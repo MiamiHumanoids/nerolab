@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-safe-teach-shutdown-32`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-smooth-brake-settle-33`.
 
 ## Core Principles
 
@@ -272,8 +272,9 @@ Important replay rules:
 
 - End the teach process immediately after saving and disconnect it. Never replay on the arm object that just left leader/drag-teach mode.
 - Let NERO Lab reconnect, verify Safe Bicep from live encoders, and launch Replay Task as a separate process. A disconnected GUI must connect and require Safe Bicep rather than launching replay from an unknown physical pose.
-- During the brief GUI-to-task subprocess handoff, release the GUI connection without disabling the motors. Disabling before the new process connects lets the unsupported arm sag away from the encoder-verified Safe Bicep pose. Ordinary disconnect first sends emergency stop, waits until all seven motor-enable bits confirm that the mechanical brakes are engaged, and only falls back to `disable()` if that confirmation does not arrive.
-- After Teach saves its samples, it returns to Safe Bicep under follower control, verifies the target, engages and verifies all seven brakes, and only then closes the CAN connection. The Safe Bicep return is not appended to the taught trajectory.
+- During the brief GUI-to-task subprocess handoff, release the GUI connection without changing motor state. Ordinary disconnect sends emergency stop and lets the arm descend smoothly from Safe Bicep to its mechanical resting pose. Nero v121 continues to report every joint as enabled during `EMERGENCY_STOP`, so enable bits are not used as brake confirmation and no subsequent `disable()` command is sent.
+- After emergency stop latches, disconnect monitors encoder motion until every joint changes by no more than 0.001 rad for 0.75 seconds, then closes CAN. If the resting pose does not settle within 8 seconds, disconnect aborts and leaves CAN connected.
+- After Teach saves its samples, it returns to Safe Bicep under follower control, verifies the target, performs the same smooth emergency-stop settle, and only then closes the CAN connection. The Safe Bicep return and settling motion are not appended to the taught trajectory.
 - Use a clean connection with `reset_on_connect=False`.
 - Do not immediately call `set_teach_mode(False)` on a fresh replay connection; that redundantly invokes follower/reset behavior.
 - Select J mode explicitly before replay.

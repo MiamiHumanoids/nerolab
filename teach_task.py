@@ -78,7 +78,7 @@ def return_to_safe_bicep_and_disconnect(robot: Nero) -> None:
     finally:
         try:
             robot.engage_brakes()
-            print("Teach shutdown: all joint brakes engaged.", flush=True)
+            print("Teach shutdown: emergency-stop resting pose settled.", flush=True)
         finally:
             robot.disconnect(disable_arm=False)
 

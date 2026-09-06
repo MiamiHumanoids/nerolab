@@ -288,48 +288,62 @@ class Nero(Robot):
         self._arm.move_j(target)
         return {"action": [float(value) for value in target]}
 
-    def engage_brakes(self, timeout: float = 2.0) -> None:
+    def engage_brakes(
+        self,
+        timeout: float = 8.0,
+        settle_time: float = 0.75,
+        sample_interval: float = 0.05,
+        motion_tolerance: float = 0.001,
+    ) -> None:
         if self._arm is None or not self.is_connected:
             raise RuntimeError("Nero is not connected")
 
         arm = self._arm
         arm.electronic_emergency_stop()
         deadline = time.monotonic() + timeout
+        stable_since: float | None = None
+        stable_joints: list[float] | None = None
+        emergency_stop_seen = False
         while time.monotonic() < deadline:
-            if not any(arm.get_joints_enable_status_list()):
+            status = arm.get_arm_status()
+            message = getattr(status, "msg", status)
+            arm_status = str(getattr(message, "arm_status", message))
+            emergency_stop_seen = emergency_stop_seen or any(
+                value in arm_status
+                for value in ("EMERGENCY_STOP", "EMERGENCY STOP", "BRAKE_NOT_RELEASED")
+            )
+            current_joints = self.get_joint_angles()
+            now = time.monotonic()
+            if stable_joints is None or any(
+                abs(current - stable) > motion_tolerance
+                for current, stable in zip(current_joints, stable_joints)
+            ):
+                stable_since = now
+                stable_joints = current_joints
+            if (
+                emergency_stop_seen
+                and stable_since is not None
+                and now - stable_since >= settle_time
+            ):
                 return
-            time.sleep(0.05)
-
-        if not hasattr(arm, "disable"):
-            raise RuntimeError("Nero arm does not expose a motor-disable command")
-        arm.disable()
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not any(arm.get_joints_enable_status_list()):
-                return
-            time.sleep(0.05)
+            time.sleep(sample_interval)
         raise RuntimeError(
-            f"Nero joint brakes did not engage; enabled joints="
-            f"{arm.get_joints_enable_status_list()}"
+            "Nero emergency-stop resting pose did not settle before disconnect; "
+            f"status={arm.get_arm_status()} joints={self.get_joint_angles()}"
         )
 
     def disconnect(self, disable_arm: bool = True) -> None:
         if self._overview_camera is not None:
             self._overview_camera.disconnect()
         if self._arm is not None:
+            if disable_arm and self.is_connected:
+                self.engage_brakes()
             try:
-                if disable_arm and self.is_connected:
-                    self.engage_brakes()
+                if hasattr(self._arm, "disconnect"):
+                    self._arm.disconnect()
             except Exception:
-                logger.exception("Failed to engage Nero brakes before disconnect")
-                raise
-            finally:
-                try:
-                    if hasattr(self._arm, "disconnect"):
-                        self._arm.disconnect()
-                except Exception:
-                    logger.debug("Ignoring SDK disconnect failure", exc_info=True)
-                self._arm = None
+                logger.debug("Ignoring SDK disconnect failure", exc_info=True)
+            self._arm = None
 
     def get_arm_status(self) -> Any:
         if not self.is_connected:
