@@ -14,10 +14,9 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
+from task_trajectory import prepare_replay_samples, smooth_move_to_target
 
 REPLAY_SPEED_PERCENT = 25
-JOINT_TOLERANCE = 0.01
-MOTION_TIMEOUT = 5.0
 
 REPO_ID = "adrian/nero_replayed"
 FEATURES = {
@@ -42,41 +41,9 @@ def rgb_image(value: object, label: str) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if image.shape[-1] == 3 else image
 
 
-def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        current = robot.get_joint_angles()
-        if all(abs(float(value) - goal) <= JOINT_TOLERANCE for value, goal in zip(current, target)):
-            return
-        time.sleep(0.02)
-    raise RuntimeError(
-        f"Replay did not reach recorded target {target}; current joints={robot.get_joint_angles()}"
-    )
-
-
-def move_to_recorded_target(robot: Nero, target: list[float]) -> None:
-    status = robot.get_arm_status()
-    message = getattr(status, "msg", status)
-    ctrl_mode = getattr(message, "ctrl_mode", None)
-    linkage_mode = "LINKAGE" in str(ctrl_mode)
-    try:
-        linkage_mode = linkage_mode or int(ctrl_mode) == 6
-    except (TypeError, ValueError):
-        pass
-
-    robot._arm.move_j(target)
-    if linkage_mode:
-        time.sleep(0.25)
-        print("Control transitioned from linkage to CAN; resending the first recorded target.")
-        robot._arm.move_j(target)
-    wait_for_target(robot, target)
-
-
 def main(task_file: Path, dataset_root: Path) -> None:
     recording = json.loads(task_file.read_text())
-    samples = recording.get("samples", [])
-    if len(samples) < 2:
-        raise ValueError("Taught task contains fewer than two samples.")
+    samples = prepare_replay_samples(recording)
     task = str(recording.get("task", task_file.stem))
 
     if dataset_root.exists():
@@ -120,48 +87,45 @@ def main(task_file: Path, dataset_root: Path) -> None:
     cv2.namedWindow("NERO replay recording", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO replay recording", 1280, 480)
     print(f"Replaying taught task and recording dataset: {dataset_root}")
-    print("Sending every recorded joint target and waiting for joint feedback.")
+    print("Streaming recorded joint targets on their original timeline.")
 
     stop_requested = False
     try:
-        start = time.monotonic()
         previous_gripper = None
+        smooth_move_to_target(robot, [float(value) for value in samples[0]["joints"]], "Replay recording")
+        replay_started = time.monotonic()
         for index, sample in enumerate(samples):
             target = [float(value) for value in sample["joints"]]
-            if len(target) != 7:
-                raise ValueError(f"Recorded sample {index + 1} has {len(target)} joints; expected 7")
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
                 effector.move_gripper_m(value=gripper, force=30.0)
                 previous_gripper = gripper
-            move_to_recorded_target(robot, target)
-            duration = float(sample["time"]) - (float(samples[index - 1]["time"]) if index else 0.0)
-            deadline = time.monotonic() + max(1.0 / 15.0, duration)
-            while time.monotonic() < deadline:
-                obs = robot.get_observation()
-                state = np.asarray(obs["observation.state"], dtype=np.float32)
-                wrist = rgb_image(obs.get("observation.images.wrist"), "wrist")
-                overview = rgb_image(obs.get("observation.images.overview"), "overview")
-                depth = np.asarray(obs.get("observation.images.wrist_depth", np.zeros((480, 640), dtype=np.float32)), dtype=np.float32)
-                if depth.ndim == 3:
-                    depth = depth[..., 0]
-                dataset.add_frame({
-                    "observation.state": state,
-                    "action": np.concatenate([state, np.asarray([gripper], dtype=np.float32)]),
-                    "observation.images.wrist": wrist,
-                    "observation.images.overview": overview,
-                    "observation.depth": depth,
-                    "task": task,
-                })
-                combined = np.hstack([wrist, overview])
-                cv2.putText(combined, f"Replay recording {index + 1}/{len(samples)}  q: stop", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.imshow("NERO replay recording", combined)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    stop_requested = True
-                    break
-                time.sleep(0.005)
-            if stop_requested:
+            robot._arm.move_js(target)
+            obs = robot.get_observation()
+            state = np.asarray(obs["observation.state"], dtype=np.float32)
+            wrist = rgb_image(obs.get("observation.images.wrist"), "wrist")
+            overview = rgb_image(obs.get("observation.images.overview"), "overview")
+            depth = np.asarray(obs.get("observation.images.wrist_depth", np.zeros((480, 640), dtype=np.float32)), dtype=np.float32)
+            if depth.ndim == 3:
+                depth = depth[..., 0]
+            dataset.add_frame({
+                "observation.state": state,
+                "action": np.concatenate([np.asarray(target, dtype=np.float32), np.asarray([gripper], dtype=np.float32)]),
+                "observation.images.wrist": wrist,
+                "observation.images.overview": overview,
+                "observation.depth": depth,
+                "task": task,
+            })
+            combined = np.hstack([wrist, overview])
+            cv2.putText(combined, f"Replay recording {index + 1}/{len(samples)}  q: stop", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.imshow("NERO replay recording", combined)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                stop_requested = True
                 break
+            next_time = float(samples[index + 1]["time"]) if index + 1 < len(samples) else float(sample["time"]) + 1.0 / 15.0
+            deadline = replay_started + next_time
+            while time.monotonic() < deadline:
+                time.sleep(0.005)
         print("Replay complete; saving episode.")
     finally:
         cv2.destroyAllWindows()

@@ -12,9 +12,9 @@ import cv2
 import numpy as np
 
 from lerobot_robot_nero import Nero, NeroConfig
+from task_trajectory import prepare_replay_samples, smooth_move_to_target
+
 REPLAY_SPEED_PERCENT = 25
-JOINT_TOLERANCE = 0.01
-MOTION_TIMEOUT = 5.0
 
 
 def to_bgr(value: object, label: str) -> np.ndarray:
@@ -41,50 +41,9 @@ def arm_status_text(robot: Nero) -> str:
     )
 
 
-def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if joints_are_close(robot, target, tolerance=JOINT_TOLERANCE):
-            return
-        time.sleep(0.02)
-    current = robot.get_joint_angles()
-    raise RuntimeError(
-        f"Replay did not reach recorded target {target}; current joints={current}; "
-        f"{arm_status_text(robot)}"
-    )
-
-
-def joints_are_close(robot: Nero, target: list[float], tolerance: float = 0.01) -> bool:
-    try:
-        current = robot.get_joint_angles()
-    except Exception:
-        return False
-    return all(abs(float(value) - goal) <= tolerance for value, goal in zip(current, target))
-
-
-def move_to_recorded_target(robot: Nero, target: list[float]) -> None:
-    status = robot.get_arm_status()
-    message = getattr(status, "msg", status)
-    ctrl_mode = getattr(message, "ctrl_mode", None)
-    linkage_mode = "LINKAGE" in str(ctrl_mode)
-    try:
-        linkage_mode = linkage_mode or int(ctrl_mode) == 6
-    except (TypeError, ValueError):
-        pass
-
-    robot._arm.move_j(target)
-    if linkage_mode:
-        time.sleep(0.25)
-        print("Control transitioned from linkage to CAN; resending the first recorded target.")
-        robot._arm.move_j(target)
-    wait_for_target(robot, target)
-
-
 def main(task_file: Path) -> None:
     recording = json.loads(task_file.read_text())
-    samples = recording.get("samples", [])
-    if len(samples) < 2:
-        raise ValueError("Taught task contains fewer than two samples.")
+    samples = prepare_replay_samples(recording)
 
     robot = Nero(NeroConfig(
         id="nero_task_replay",
@@ -116,23 +75,23 @@ def main(task_file: Path) -> None:
     cv2.namedWindow("NERO task replay", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO task replay", 1280, 480)
     print(f"Replaying task without recording: {task_file}")
-    print("Sending every recorded joint target and waiting for joint feedback.")
+    print("Streaming recorded joint targets on their original timeline.")
     stop_requested = False
     previous_gripper = None
     try:
+        smooth_move_to_target(robot, [float(value) for value in samples[0]["joints"]], "Task replay")
+        replay_started = time.monotonic()
         for index, sample in enumerate(samples):
             target = [float(value) for value in sample["joints"]]
-            if len(target) != 7:
-                raise ValueError(f"Recorded sample {index + 1} has {len(target)} joints; expected 7")
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
             if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
                 effector.move_gripper_m(value=gripper, force=30.0)
                 previous_gripper = gripper
-            move_to_recorded_target(robot, target)
+            robot._arm.move_js(target)
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")
-            previous_time = float(samples[index - 1]["time"]) if index else 0.0
-            deadline = time.monotonic() + max(1.0 / 15.0, float(sample["time"]) - previous_time)
+            next_time = float(samples[index + 1]["time"]) if index + 1 < len(samples) else float(sample["time"]) + 1.0 / 15.0
+            deadline = replay_started + next_time
             while time.monotonic() < deadline:
                 observation = robot.get_observation()
                 wrist = to_bgr(observation.get("observation.images.wrist"), "wrist")

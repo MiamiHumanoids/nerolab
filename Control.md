@@ -262,16 +262,20 @@ The gripper slider is also debounced. Without debouncing, a drag emitted one com
 
 ## Replay and Recorded Motion
 
-Recorded tasks store raw encoder joint angles. Replay sends those explicit recorded angles and verifies encoder arrival.
+Teach mode reports leader-space encoder coordinates, which are not directly legal follower-mode commands. New recordings preserve those raw values as `leader_joints` and also store replayable `joints` by anchoring the first leader sample to the follower encoder pose captured immediately before teach mode. This preserves every taught delta without commanding leader calibration offsets as follower angles.
+
+Legacy recordings without `joint_space: follower` are checked before replay. If their values exceed follower command limits, the first sample is anchored to Safe Bicep and the same relative offsets are applied to the complete trajectory.
 
 Important replay rules:
 
 - Use a clean connection with `reset_on_connect=False`.
 - Do not immediately call `set_teach_mode(False)` on a fresh replay connection; that redundantly invokes follower/reset behavior.
 - Select J mode explicitly before replay.
-- Treat the first command after linkage or teach-mode transitions carefully and resend only when feedback proves the transition requires it.
-- Verify each target from encoders instead of trusting `move_j` return values.
-- Preserve exact recorded targets unless a documented safety limit requires aborting.
+- Ease from the current encoder pose to the first recorded target with a bounded 50 Hz `move_js` stream, then verify that pose from encoders.
+- Replay subsequent targets with `move_js` against their absolute recorded timestamps. Do not wait for every 15 FPS sample to settle; that creates stop-and-go motion and destroys the taught timing.
+- Schedule gripper changes on the same recorded timeline.
+- Validate every converted target against command limits before moving; never silently clamp an unsafe taught trajectory.
+- During replay-and-record, store measured joints in `observation.state` and taught target joints plus gripper in `action`.
 
 ## Debugging with Activity Trace
 

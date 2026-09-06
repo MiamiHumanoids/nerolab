@@ -13,10 +13,9 @@ import numpy as np
 
 from lerobot_robot_nero import Nero, NeroConfig
 from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
+from task_trajectory import convert_leader_samples, smooth_move_to_target
 
 FPS = 15
-JOINT_TOLERANCE = 0.01
-MOTION_TIMEOUT = 5.0
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
 
 
@@ -29,36 +28,6 @@ def read_gripper_width(effector, fallback: float = 0.1) -> float:
     except Exception:
         pass
     return fallback
-
-
-def wait_for_target(robot: Nero, target: list[float], timeout: float = MOTION_TIMEOUT) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        current = robot.get_joint_angles()
-        if all(abs(float(value) - goal) <= JOINT_TOLERANCE for value, goal in zip(current, target)):
-            return
-        time.sleep(0.02)
-    raise RuntimeError(
-        f"Replay did not reach recorded target {target}; current joints={robot.get_joint_angles()}"
-    )
-
-
-def move_to_recorded_target(robot: Nero, target: list[float]) -> None:
-    status = robot.get_arm_status()
-    message = getattr(status, "msg", status)
-    ctrl_mode = getattr(message, "ctrl_mode", None)
-    linkage_mode = "LINKAGE" in str(ctrl_mode)
-    try:
-        linkage_mode = linkage_mode or int(ctrl_mode) == 6
-    except (TypeError, ValueError):
-        pass
-
-    robot._arm.move_j(target)
-    if linkage_mode:
-        time.sleep(0.25)
-        print("Control transitioned from linkage to CAN; resending the first recorded target.")
-        robot._arm.move_j(target)
-    wait_for_target(robot, target)
 
 
 def main(task: str, output: Path) -> None:
@@ -95,6 +64,7 @@ def main(task: str, output: Path) -> None:
     print("Press q in the teach window to save the task.")
 
     try:
+        follower_anchor = [float(value) for value in robot.get_joint_angles()]
         robot.set_teach_mode(True)
         robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=1))
         while True:
@@ -132,8 +102,15 @@ def main(task: str, output: Path) -> None:
     start_time = float(sequence[0]["time"])
     for sample in sequence:
         sample["time"] = float(sample["time"]) - start_time
+    sequence = convert_leader_samples(sequence, follower_anchor)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"task": task, "fps": FPS, "samples": sequence}, indent=2))
+    output.write_text(json.dumps({
+        "task": task,
+        "fps": FPS,
+        "joint_space": "follower",
+        "follower_anchor": follower_anchor,
+        "samples": sequence,
+    }, indent=2))
     print(f"Saved taught task: {output} ({len(sequence)} samples)")
     replay_trigger = output.with_suffix(".replay")
     replay_trigger.unlink(missing_ok=True)
@@ -141,25 +118,23 @@ def main(task: str, output: Path) -> None:
     while not replay_trigger.exists():
         time.sleep(0.1)
     replay_trigger.unlink(missing_ok=True)
-    print("Sending every recorded joint target and waiting for joint feedback.")
+    print("Streaming recorded joint targets on their original timeline.")
     robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
     robot._arm.set_speed_percent(25)
     cv2.namedWindow("NERO task replay", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO task replay", 1280, 480)
     previous_gripper = None
+    smooth_move_to_target(robot, [float(value) for value in sequence[0]["joints"]], "Teach replay")
+    replay_started = time.monotonic()
     for index, sample in enumerate(sequence):
         target = [float(value) for value in sample["joints"]]
-        if len(target) != 7:
-            raise ValueError(f"Recorded sample {index + 1} has {len(target)} joints; expected 7")
         gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
         if previous_gripper is None or abs(gripper - previous_gripper) > 0.002:
             effector.move_gripper_m(value=gripper, force=30.0)
             previous_gripper = gripper
-        move_to_recorded_target(robot, target)
-        deadline = time.monotonic() + max(
-            1.0 / FPS,
-            float(sample["time"]) - (float(sequence[index - 1]["time"]) if index else 0.0),
-        )
+        robot._arm.move_js(target)
+        next_time = float(sequence[index + 1]["time"]) if index + 1 < len(sequence) else float(sample["time"]) + 1.0 / FPS
+        deadline = replay_started + next_time
         while time.monotonic() < deadline:
             observation = robot.get_observation()
             frames = []
