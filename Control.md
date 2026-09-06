@@ -2,7 +2,7 @@
 
 This document records the hardware-tested lessons that made NERO arm control reliable and smooth with `pyAgxArm`, NERO firmware `v121`, and SocketCAN.
 
-The current reference implementation is in `nero_lab.py`, build `2026-09-06-verified-replay-start-26`.
+The current reference implementation is in `nero_lab.py`, build `2026-09-06-no-sag-handoff-27`.
 
 ## Core Principles
 
@@ -272,6 +272,7 @@ Important replay rules:
 
 - End the teach process immediately after saving and disconnect it. Never replay on the arm object that just left leader/drag-teach mode.
 - Let NERO Lab reconnect, verify Safe Bicep from live encoders, and launch Replay Task as a separate process. A disconnected GUI must connect and require Safe Bicep rather than launching replay from an unknown physical pose.
+- During the brief GUI-to-task subprocess handoff, release the GUI connection without disabling the motors. Disabling before the new process connects lets the unsupported arm sag away from the encoder-verified Safe Bicep pose. Ordinary disconnect and shutdown still brake and disable normally.
 - Use a clean connection with `reset_on_connect=False`.
 - Do not immediately call `set_teach_mode(False)` on a fresh replay connection; that redundantly invokes follower/reset behavior.
 - Select J mode explicitly before replay.

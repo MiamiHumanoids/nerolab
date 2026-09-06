@@ -96,6 +96,29 @@ def test_get_joint_angles_wrapper_returns_underlying_arm_values():
     assert robot.get_joint_angles() == [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 
 
+def test_task_handoff_disconnect_can_preserve_enabled_motors():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class DummyArm:
+        def __init__(self):
+            self.disable_calls = 0
+
+        def is_connected(self):
+            return True
+
+        def disable(self):
+            self.disable_calls += 1
+
+    dummy = DummyArm()
+    robot._arm = dummy
+
+    robot.disconnect(disable_arm=False)
+
+    assert dummy.disable_calls == 0
+    assert robot._arm is None
+
+
 def test_robot_observation_and_action_keys_match_lerobot_schema():
     cfg = NeroConfig(id="test-arm", can_channel="can0")
     robot = Nero(cfg)

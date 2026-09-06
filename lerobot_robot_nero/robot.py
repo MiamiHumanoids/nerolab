@@ -288,12 +288,12 @@ class Nero(Robot):
         self._arm.move_j(target)
         return {"action": [float(value) for value in target]}
 
-    def disconnect(self) -> None:
+    def disconnect(self, disable_arm: bool = True) -> None:
         if self._overview_camera is not None:
             self._overview_camera.disconnect()
         if self._arm is not None:
             try:
-                if self.is_connected and hasattr(self._arm, "disable"):
+                if disable_arm and self.is_connected and hasattr(self._arm, "disable"):
                     self._arm.disable()
             except Exception:
                 logger.debug("Ignoring disconnect failure", exc_info=True)

@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import prepare_replay_samples
 
-APP_BUILD = "2026-09-06-verified-replay-start-26"
+APP_BUILD = "2026-09-06-no-sag-handoff-27"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -352,7 +352,7 @@ class NeroLab(tk.Tk):
         self.log_message("Arm connected")
         self.log_arm_debug("connect complete")
 
-    def disconnect_robot(self, emergency_brake: bool = True) -> None:
+    def disconnect_robot(self, emergency_brake: bool = True, disable_arm: bool = True) -> None:
         self.cancel_slider_motion()
         if self.robot is not None:
             try:
@@ -370,7 +370,7 @@ class NeroLab(tk.Tk):
                     self.log_message("Emergency brake activated before disconnect")
                 except Exception as exc:
                     self.log_message(f"Emergency brake before disconnect failed: {exc}")
-            self.robot.disconnect()
+            self.robot.disconnect(disable_arm=disable_arm)
             self.robot = None
         self.arm_status_var.set("Arm status: not connected")
         self.log_message("Arm disconnected")
@@ -1075,7 +1075,7 @@ class NeroLab(tk.Tk):
         if not safe:
             messagebox.showwarning("Safe reset required", "Move the arm to Safe Bicep Reset before starting this task flow.")
             return False
-        self.disconnect_robot(emergency_brake=emergency_brake)
+        self.disconnect_robot(emergency_brake=emergency_brake, disable_arm=False)
         return self.robot is None
 
     def teach_task(self) -> None:
