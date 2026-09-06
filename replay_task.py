@@ -13,7 +13,7 @@ from task_trajectory import (
     command_recorded_gripper,
     prepare_replay_samples,
     safe_bicep_shutdown,
-    smooth_move_to_target,
+    smooth_move_with_recovery,
     stream_recorded_trajectory,
 )
 
@@ -73,7 +73,11 @@ def main(task_file: Path) -> None:
     )
     previous_gripper: tuple[str, float] | None = None
     try:
-        smooth_move_to_target(robot, [float(value) for value in samples[0]["joints"]], "Task replay")
+        smooth_move_with_recovery(
+            robot,
+            [float(value) for value in samples[0]["joints"]],
+            "Task replay",
+        )
         robot._arm.set_speed_percent(TRAJECTORY_SPEED_PERCENT)
         print(f"Recorded trajectory speed set to {TRAJECTORY_SPEED_PERCENT}%.")
         def apply_sample(sample: dict[str, object], index: int) -> None:

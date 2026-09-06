@@ -236,11 +236,15 @@ def prepare_safe_bicep_motion(robot: Any, label: str) -> None:
     time.sleep(0.2)
 
 
+def smooth_move_with_recovery(robot: Any, target: list[float], label: str) -> None:
+    prepare_safe_bicep_motion(robot, label)
+    smooth_move_to_target(robot, target, label)
+
+
 def safe_bicep_shutdown(robot: Any, label: str) -> None:
     try:
         robot._arm.set_speed_percent(25)
-        prepare_safe_bicep_motion(robot, label)
-        smooth_move_to_target(robot, SAFE_BICEP_JOINTS, label)
+        smooth_move_with_recovery(robot, SAFE_BICEP_JOINTS, label)
         print(f"{label}: Safe Bicep reached.", flush=True)
     finally:
         robot.engage_brakes()

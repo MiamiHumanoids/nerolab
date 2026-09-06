@@ -14,7 +14,7 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lerobot_robot_nero import Nero, NeroConfig
-from task_trajectory import prepare_replay_samples, safe_bicep_shutdown, smooth_move_to_target
+from task_trajectory import prepare_replay_samples, safe_bicep_shutdown, smooth_move_with_recovery
 
 REPLAY_SPEED_PERCENT = 25
 
@@ -92,7 +92,11 @@ def main(task_file: Path, dataset_root: Path) -> None:
     stop_requested = False
     try:
         previous_gripper = None
-        smooth_move_to_target(robot, [float(value) for value in samples[0]["joints"]], "Replay recording")
+        smooth_move_with_recovery(
+            robot,
+            [float(value) for value in samples[0]["joints"]],
+            "Replay recording",
+        )
         replay_started = time.monotonic()
         for index, sample in enumerate(samples):
             target = [float(value) for value in sample["joints"]]

@@ -11,6 +11,7 @@ from task_trajectory import (
     is_safe_bicep_pose,
     prepare_replay_samples,
     safe_bicep_shutdown,
+    smooth_move_with_recovery,
 )
 
 
@@ -176,6 +177,26 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("move", SAFE_BICEP_JOINTS, "Replay shutdown"),
             ("brakes",),
             ("disconnect", False),
+        ])
+
+    def test_replay_approach_prepares_before_joint_motion(self):
+        events = []
+        target = [0.1] * 7
+
+        with patch(
+            "task_trajectory.prepare_safe_bicep_motion",
+            side_effect=lambda robot, label: events.append(("prepare", label)),
+        ), patch(
+            "task_trajectory.smooth_move_to_target",
+            side_effect=lambda robot, goal, label: events.append(
+                ("move", goal.copy(), label)
+            ),
+        ):
+            smooth_move_with_recovery(object(), target, "Task replay")
+
+        self.assertEqual(events, [
+            ("prepare", "Task replay"),
+            ("move", target, "Task replay"),
         ])
 
 
