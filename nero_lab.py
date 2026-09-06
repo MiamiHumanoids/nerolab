@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-control-debug-7"
+APP_BUILD = "2026-09-06-control-debug-8"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -446,12 +446,15 @@ class NeroLab(tk.Tk):
         mode_result = self.set_motion_mode_and_wait(
             robot, robot._arm.OPTIONS.MOTION_MODE.P, "MOVE_P", f"{label} prime"
         )
+        initial_joints = [float(value) for value in robot.get_joint_angles()]
         move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
         self.log_message(
             f"COMMAND {label} prime mode_p={mode_result!r} move_p={move_result!r} "
             f"target={CONTROL_PRIME_POSE}"
         )
         deadline = time.monotonic() + timeout
+        retry_at = time.monotonic() + 0.75
+        attempts = 1
         while time.monotonic() < deadline:
             status = robot.get_arm_status()
             message = getattr(status, "msg", status)
@@ -461,6 +464,17 @@ class NeroLab(tk.Tk):
             if "NORMAL" in arm_status and "MOVE_P" in mode_feedback and all(enabled):
                 self.log_arm_debug(f"{label} P prime reached normal control")
                 break
+            if attempts < 3 and time.monotonic() >= retry_at:
+                current = [float(value) for value in robot.get_joint_angles()]
+                moved = any(abs(value - start) > 0.005 for value, start in zip(current, initial_joints))
+                if not moved:
+                    attempts += 1
+                    retry_result = robot._arm.move_p(CONTROL_PRIME_POSE)
+                    self.log_message(
+                        f"COMMAND {label} P prime retry {attempts}/3 returned {retry_result!r}; "
+                        "no encoder movement detected"
+                    )
+                retry_at = time.monotonic() + 0.75
             time.sleep(0.05)
         else:
             raise RuntimeError(f"{label} P prime did not clear controller fault: {self.arm_debug_text(robot)}")
@@ -486,14 +500,20 @@ class NeroLab(tk.Tk):
         )
 
     def prepare_reset_motion(self, robot: Nero, label: str) -> None:
-        has_fault = self.controller_has_fault(robot)
+        status = robot.get_arm_status()
+        message = getattr(status, "msg", status)
+        arm_status = str(getattr(message, "arm_status", ""))
+        has_kinematic_fault = "SINGULARITY" in arm_status or "NO_SOLUTION" in arm_status
+        has_brake_fault = "BRAKE_NOT_RELEASED" in arm_status
         outside_limits = self.joints_outside_command_limits(robot)
-        if has_fault:
-            self.log_message(f"DEBUG {label} detected controller fault; running follower/reset/enable recovery")
+        if has_brake_fault:
+            self.log_message(f"DEBUG {label} detected brake fault; running follower/reset/enable recovery")
             robot.set_teach_mode(False)
             self.log_arm_debug(f"{label} after controller recovery")
-        if has_fault or outside_limits:
-            reason = "controller fault" if has_fault else "current joints outside command limits"
+        if has_kinematic_fault or has_brake_fault or outside_limits:
+            reason = "kinematic fault" if has_kinematic_fault else (
+                "brake fault" if has_brake_fault else "current joints outside command limits"
+            )
             self.log_message(f"DEBUG {label} priming P control because {reason}")
             self.prime_position_control(robot, label)
         else:
