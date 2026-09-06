@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-control-debug-4"
+APP_BUILD = "2026-09-06-control-debug-5"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -28,6 +28,15 @@ UPRIGHT_RESET_JOINTS = [0.0, -0.2, 0.0, 0.4, 0.0, 0.2, 0.0]
 SAFE_BICEP_RESET_JOINTS = [0.0, -1.68, 0.023, 2.08, -0.026, 0.076, 1.50]
 RESET_SPEED_PERCENT = 25
 SLIDER_DEBOUNCE_MS = 100
+COMMAND_JOINT_LIMITS = [
+    (-2.705261, 2.705261),
+    (-1.74533, 1.74533),
+    (-2.757621, 2.757621),
+    (-1.012291, 2.146755),
+    (-2.757621, 2.757621),
+    (-0.733039, 0.959932),
+    (-1.570797, 1.570797),
+]
 PROJECT_ROOT = Path(__file__).resolve().parent
 RECORDER = PROJECT_ROOT / "manual_record_dataset.py"
 REPLAYER = PROJECT_ROOT / "replay_latest_dataset.py"
@@ -226,7 +235,6 @@ class NeroLab(tk.Tk):
         self._build_inference_tab(inference_tab)
 
     def _build_arm_tab(self, parent: ttk.Frame) -> None:
-        limits = [(-2.705261, 2.705261), (-1.74533, 1.74533), (-2.757621, 2.757621), (-1.012291, 2.146755), (-2.757621, 2.757621), (-0.733039, 0.959932), (-1.570797, 1.570797)]
         connection = ttk.Frame(parent)
         connection.pack(fill="x")
         ttk.Button(connection, text="Connect arm", command=self.connect_robot).pack(side="left")
@@ -247,7 +255,7 @@ class NeroLab(tk.Tk):
 
         joints = ttk.LabelFrame(parent, text="Joint angles (radians)", padding=12)
         joints.pack(fill="x", pady=(16, 10))
-        for index, (variable, enable_var, disable_var, (actual_lower, actual_upper)) in enumerate(zip(self.joint_vars, self.joint_enable_vars, self.joint_disable_vars, limits), 1):
+        for index, (variable, enable_var, disable_var, (actual_lower, actual_upper)) in enumerate(zip(self.joint_vars, self.joint_enable_vars, self.joint_disable_vars, COMMAND_JOINT_LIMITS), 1):
             slider_limit = max(abs(actual_lower), abs(actual_upper))
             row = ttk.Frame(joints)
             row.pack(fill="x", pady=3)
@@ -445,23 +453,33 @@ class NeroLab(tk.Tk):
         mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
         self.log_message(f"COMMAND {label} switch mode_j returned {mode_result!r}")
 
-    def controller_requires_prime(self, robot: Nero) -> bool:
+    def controller_has_fault(self, robot: Nero) -> bool:
         status = robot.get_arm_status()
         message = getattr(status, "msg", status)
         arm_status = str(getattr(message, "arm_status", ""))
-        motion_status = str(getattr(message, "motion_status", ""))
         return (
             "SINGULARITY" in arm_status
             or "NO_SOLUTION" in arm_status
             or "BRAKE_NOT_RELEASED" in arm_status
-            or "FAILED" in motion_status
+        )
+
+    def joints_outside_command_limits(self, robot: Nero) -> bool:
+        current = robot.get_joint_angles()
+        return any(
+            float(value) < lower or float(value) > upper
+            for value, (lower, upper) in zip(current, COMMAND_JOINT_LIMITS)
         )
 
     def prepare_reset_motion(self, robot: Nero, label: str) -> None:
-        if self.controller_requires_prime(robot):
-            self.log_message(f"DEBUG {label} detected controller fault or failed motion; recovering and priming P control")
+        has_fault = self.controller_has_fault(robot)
+        outside_limits = self.joints_outside_command_limits(robot)
+        if has_fault:
+            self.log_message(f"DEBUG {label} detected controller fault; running follower/reset/enable recovery")
             robot.set_teach_mode(False)
             self.log_arm_debug(f"{label} after controller recovery")
+        if has_fault or outside_limits:
+            reason = "controller fault" if has_fault else "current joints outside command limits"
+            self.log_message(f"DEBUG {label} priming P control because {reason}")
             self.prime_position_control(robot, label)
         else:
             mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
@@ -518,11 +536,17 @@ class NeroLab(tk.Tk):
             desired = self.pending_slider_value
             if joint is None or desired is None:
                 return
+            self.pending_slider_joint = None
+            self.pending_slider_value = None
             self.safe_bicep_position_reached = False
             self.log_arm_debug(f"slider joint={joint} requested={desired}")
-            if self.controller_requires_prime(robot):
-                self.log_message("DEBUG slider detected controller fault or failed motion; running P-to-J control prime")
-                self.prime_position_control(robot, "slider")
+            if self.controller_has_fault(robot) or self.joints_outside_command_limits(robot):
+                self.set_joint_slider_values(robot.get_joint_angles())
+                self.log_message(
+                    "COMMAND slider blocked: controller fault or current joints outside command limits; "
+                    "use Upright Reset or Safe Bicep Reset first"
+                )
+                return
             targets = [float(value) for value in robot.get_joint_angles()]
             targets[joint - 1] = desired
             self.set_joint_slider_values(targets)
