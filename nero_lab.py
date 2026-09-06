@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
 
-APP_BUILD = "2026-09-06-control-debug-6"
+APP_BUILD = "2026-09-06-control-debug-7"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 CONTROL_PRIME_POSE = [-0.4, 0.0, 0.4, -1.57, 0.0, -3.14]
@@ -430,8 +430,22 @@ class NeroLab(tk.Tk):
         except Exception as exc:
             self.log_message(f"DEBUG {label}: status read failed: {exc}")
 
+    def set_motion_mode_and_wait(self, robot: Nero, mode, expected: str, label: str, timeout: float = 2.0):
+        result = robot._arm.set_motion_mode(mode)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = robot.get_arm_status()
+            message = getattr(status, "msg", status)
+            if expected in str(getattr(message, "mode_feedback", "")):
+                self.log_message(f"COMMAND {label} mode confirmed as {expected}; set_motion_mode returned {result!r}")
+                return result
+            time.sleep(0.02)
+        raise RuntimeError(f"{label} did not enter {expected}: {self.arm_debug_text(robot)}")
+
     def prime_position_control(self, robot: Nero, label: str, timeout: float = 5.0) -> None:
-        mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
+        mode_result = self.set_motion_mode_and_wait(
+            robot, robot._arm.OPTIONS.MOTION_MODE.P, "MOVE_P", f"{label} prime"
+        )
         move_result = robot._arm.move_p(CONTROL_PRIME_POSE)
         self.log_message(
             f"COMMAND {label} prime mode_p={mode_result!r} move_p={move_result!r} "
@@ -450,8 +464,9 @@ class NeroLab(tk.Tk):
             time.sleep(0.05)
         else:
             raise RuntimeError(f"{label} P prime did not clear controller fault: {self.arm_debug_text(robot)}")
-        mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-        self.log_message(f"COMMAND {label} switch mode_j returned {mode_result!r}")
+        self.set_motion_mode_and_wait(
+            robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", f"{label} switch to J"
+        )
 
     def controller_has_fault(self, robot: Nero) -> bool:
         status = robot.get_arm_status()
@@ -482,8 +497,9 @@ class NeroLab(tk.Tk):
             self.log_message(f"DEBUG {label} priming P control because {reason}")
             self.prime_position_control(robot, label)
         else:
-            mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
-            self.log_message(f"COMMAND {label} controller already normal; mode_j returned {mode_result!r}")
+            self.set_motion_mode_and_wait(
+                robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", f"{label} controller already normal"
+            )
 
     def emergency_brake(self) -> None:
         robot = self.require_robot()
@@ -550,7 +566,9 @@ class NeroLab(tk.Tk):
             targets = [float(value) for value in robot.get_joint_angles()]
             targets[joint - 1] = desired
             self.set_joint_slider_values(targets)
-            mode_result = robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
+            mode_result = self.set_motion_mode_and_wait(
+                robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", "slider"
+            )
             move_result = robot._arm.move_j(targets)
             self.log_message(
                 f"COMMAND slider joint={joint} requested={desired} mode_j={mode_result!r} "
