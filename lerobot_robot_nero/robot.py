@@ -5,6 +5,8 @@ import subprocess
 import time
 from typing import Any
 
+import can
+import can.interfaces
 from lerobot.processor import RobotAction, RobotObservation
 from lerobot.robots import Robot
 
@@ -20,12 +22,17 @@ class Nero(Robot):
     config_class = NeroConfig
     name = "nero"
     JOINT_KEYS = tuple(f"joint{i}.pos" for i in range(1, 8))
+    GRIPPER_WIDTH_MIN_M = 0.0
+    GRIPPER_WIDTH_MAX_M = 0.1
+    GRIPPER_FORCE_MIN = 0.0
+    GRIPPER_FORCE_MAX = 30.0
 
     def __init__(self, config: NeroConfig):
         super().__init__(config)
         self.config = config
         self._arm = None
         self._gripper_effector = None
+        self._last_gripper_feedback = (self.GRIPPER_WIDTH_MAX_M, 0.0)
         self._teach_mode_enabled = False
         self._camera = IntelRealSenseD405(
             device_index=0,
@@ -41,8 +48,9 @@ class Nero(Robot):
 
     @property
     def observation_features(self) -> dict[str, tuple[int, ...] | tuple[int, int, int]]:
+        state_size = len(self.JOINT_KEYS) + (2 if self.config.has_gripper else 0)
         features = {
-            "observation.state": (len(self.JOINT_KEYS),),
+            "observation.state": (state_size,),
             "observation.images.wrist": (self._camera.height, self._camera.width, 3)
             if self._camera is not None
             else (480, 640, 3),
@@ -53,13 +61,30 @@ class Nero(Robot):
 
     @property
     def action_features(self) -> dict[str, tuple[int, ...]]:
-        return {"action": (len(self.JOINT_KEYS),)}
+        action_size = len(self.JOINT_KEYS) + (2 if self.config.has_gripper else 0)
+        return {"action": (action_size,)}
 
     @property
     def is_connected(self) -> bool:
         return bool(self._arm is not None and getattr(self._arm, "is_connected", lambda: False)())
 
+    def _prepare_can_backend(self) -> None:
+        if os.name == "nt" and self.config.can_interface == "gs_usb":
+            from .windows_gs_usb import register_windows_gs_usb
+
+            register_windows_gs_usb()
+
     def check_can_interface(self) -> bool:
+        self._prepare_can_backend()
+        if self.config.can_interface in {"gs_usb", "agx_cando"}:
+            configs = can.detect_available_configs(interfaces=self.config.can_interface)
+            return any(
+                str(config.get("channel")) == str(self.config.can_channel)
+                for config in configs
+            )
+        if self.config.can_interface != "socketcan":
+            return True
+
         channel = self.config.can_channel
         if os.path.exists(f"/sys/class/net/{channel}"):
             return True
@@ -92,9 +117,10 @@ class Nero(Robot):
     def _build_target(self, action: RobotAction) -> list[float]:
         if "action" in action:
             values = list(action["action"])
-            if len(values) != len(self.JOINT_KEYS):
-                raise ValueError(f"Expected {len(self.JOINT_KEYS)} action values, got {len(values)}")
-            return [float(v) for v in values]
+            expected = len(self.JOINT_KEYS) + (2 if self.config.has_gripper else 0)
+            if len(values) != expected:
+                raise ValueError(f"Expected {expected} action values, got {len(values)}")
+            return [float(v) for v in values[: len(self.JOINT_KEYS)]]
 
         values: list[float] = []
         for key in self.JOINT_KEYS:
@@ -103,16 +129,69 @@ class Nero(Robot):
             values.append(float(action[key]))
         return values
 
+    def get_gripper_feedback(self) -> tuple[float, float]:
+        if not self.config.has_gripper:
+            raise RuntimeError("Nero gripper feedback requested without a gripper")
+        effector = self._get_gripper_effector()
+        status = effector.get_gripper_status() if effector is not None else None
+        if status is None:
+            return self._last_gripper_feedback
+        message = getattr(status, "msg", status)
+        mode = str(getattr(message, "mode", "width"))
+        if mode != "width":
+            raise RuntimeError(
+                f"Nero gripper feedback is {mode!r}; width-mode feedback is required"
+            )
+        width = min(
+            max(float(message.value), self.GRIPPER_WIDTH_MIN_M),
+            self.GRIPPER_WIDTH_MAX_M,
+        )
+        force = min(
+            max(float(getattr(message, "force", 0.0)), self.GRIPPER_FORCE_MIN),
+            self.GRIPPER_FORCE_MAX,
+        )
+        self._last_gripper_feedback = (width, force)
+        return self._last_gripper_feedback
+
+    def _enable_can_feedback(self) -> None:
+        if self._arm is None:
+            return
+        msg_mode = getattr(self._arm, "_msg_mode", None)
+        set_mode = getattr(self._arm, "_set_mode", None)
+        enums = getattr(msg_mode, "Enums", None)
+        reporting = getattr(enums, "CanActiveMsgReporting", None)
+        if msg_mode is None or set_mode is None or reporting is None:
+            return
+
+        previous_move_mode = msg_mode.move_mode
+        try:
+            msg_mode.move_mode = 255
+            msg_mode.enable_can_push = reporting.ENABLE
+            set_mode()
+        finally:
+            msg_mode.move_mode = previous_move_mode
+        time.sleep(0.25)
+
     def connect(self, calibrate: bool = True) -> None:
         if self._arm is not None and self.is_connected:
             return
 
-        if not self.check_can_interface():
+        self._prepare_can_backend()
+        logger.info("Checking CAN interface %s channel %s", self.config.can_interface, self.config.can_channel)
+        if self.config.can_interface != "gs_usb" and not self.check_can_interface():
+            if self.config.can_interface in {"gs_usb", "agx_cando"}:
+                raise RuntimeError(
+                    f"Agilex CAN device channel '{self.config.can_channel}' was not detected. "
+                    "Close other CAN programs, reconnect the official Agilex USB-CAN "
+                    "module, and confirm that it appears in Windows Device Manager."
+                )
             raise RuntimeError(
                 f"SocketCAN interface '{self.config.can_channel}' is not available. "
-                "Run: sudo ip link set can0 up type can bitrate 1000000"
+                f"On Linux run: sudo ip link set {self.config.can_channel} up type can "
+                f"bitrate {self.config.bitrate}"
             )
 
+        logger.info("Creating NERO SDK configuration")
         cfg = create_agx_arm_config(
             robot=ArmModel.NERO,
             firmeware_version=self.config.firmware_version,
@@ -125,19 +204,27 @@ class Nero(Robot):
             timeout=self.config.timeout,
         )
 
+        logger.info("Creating NERO arm driver")
         self._arm = AgxArmFactory.create_arm(cfg)
+        logger.info("Opening NERO CAN connection")
         self._arm.connect()
+        logger.info("NERO CAN connection opened")
 
+        logger.info("Configuring NERO arm")
         self._arm.set_auto_set_motion_mode_enabled(False)
         self._arm.set_joint_limits_enabled(False)
         self._arm.set_speed_percent(self.config.speed_percent)
         if self.config.reset_on_connect and hasattr(self._arm, "reset"):
+            logger.info("Resetting NERO arm")
             if hasattr(self._arm, "set_follower_mode"):
                 self._arm.set_follower_mode()
                 time.sleep(0.5)
             self._arm.reset()
             time.sleep(1.0)
+        logger.info("Enabling NERO CAN feedback")
+        self._enable_can_feedback()
         if hasattr(self._arm, "enable"):
+            logger.info("Enabling NERO arm joints")
             deadline = time.monotonic() + 5.0
             enabled = False
             while time.monotonic() < deadline:
@@ -148,6 +235,7 @@ class Nero(Robot):
             if not enabled:
                 raise RuntimeError("NERO arm joints did not re-enable after reset")
         self.configure()
+        logger.info("NERO arm connection complete")
 
     @property
     def is_calibrated(self) -> bool:
@@ -274,10 +362,20 @@ class Nero(Robot):
             raise RuntimeError("Nero does not expose usable joint-angle feedback")
 
         values = self._normalize_joint_angles(raw_angles)
+        if self.config.has_gripper:
+            values.extend(self.get_gripper_feedback())
         obs: RobotObservation = {"observation.state": [float(value) for value in values]}
         if self._camera is not None:
             if not self._camera.is_connected:
+                overview_was_connected = bool(
+                    self._overview_camera is not None
+                    and self._overview_camera.is_connected
+                )
+                if overview_was_connected:
+                    self._overview_camera.disconnect()
                 self._camera.connect()
+                if overview_was_connected:
+                    self._overview_camera.connect()
             color, depth = self._camera.capture_frame()
             if color is not None:
                 obs["observation.images.wrist"] = color
@@ -297,7 +395,23 @@ class Nero(Robot):
 
         target = self._build_target(action)
         self._arm.move_j(target)
-        return {"action": [float(value) for value in target]}
+        result = [float(value) for value in target]
+        if self.config.has_gripper:
+            values = list(action["action"])
+            width = min(
+                max(float(values[-2]), self.GRIPPER_WIDTH_MIN_M),
+                self.GRIPPER_WIDTH_MAX_M,
+            )
+            force = min(
+                max(float(values[-1]), self.GRIPPER_FORCE_MIN),
+                self.GRIPPER_FORCE_MAX,
+            )
+            effector = self._get_gripper_effector()
+            if effector is None:
+                raise RuntimeError("Nero gripper effector is unavailable")
+            effector.move_gripper_m(value=width, force=force)
+            result.extend((width, force))
+        return {"action": result}
 
     def engage_brakes(
         self,

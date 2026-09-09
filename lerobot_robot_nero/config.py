@@ -1,6 +1,19 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import platform
 
 from lerobot.robots import RobotConfig
+
+
+def default_can_interface() -> str:
+    return "gs_usb" if platform.system() == "Windows" else "socketcan"
+
+
+def default_can_channel() -> str:
+    return "0" if platform.system() == "Windows" else "can0"
+
+
+def default_overview_camera_index() -> int:
+    return 2 if platform.system() == "Windows" else 0
 
 
 @RobotConfig.register_subclass("nero")
@@ -8,8 +21,8 @@ from lerobot.robots import RobotConfig
 class NeroConfig(RobotConfig):
     """Configuration object for the Agilex NERO arm with gripper and wrist camera."""
 
-    can_interface: str = "socketcan"
-    can_channel: str = "can0"
+    can_interface: str = field(default_factory=default_can_interface)
+    can_channel: str = field(default_factory=default_can_channel)
     bitrate: int = 1_000_000
     firmware_version: str = "v121"
     enable_check_can: bool = True
@@ -23,5 +36,5 @@ class NeroConfig(RobotConfig):
     camera_serial: str | None = None
     camera_device: str = "realsense"
     has_overview_camera: bool = False
-    overview_camera_index: int = 0
+    overview_camera_index: int = field(default_factory=default_overview_camera_index)
     reset_on_connect: bool = True

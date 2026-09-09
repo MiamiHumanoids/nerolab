@@ -1,43 +1,21 @@
 # Not using this file
 
-import os
-import select
 import sys
-import termios
 import time
-import tty
 
 from pyAgxArm import AgxArmFactory, ArmModel, create_agx_arm_config
+from lerobot_robot_nero.config import default_can_channel, default_can_interface
+from lerobot_robot_nero.console import read_char
 
 
 def create_demo_config():
     return create_agx_arm_config(
         robot=ArmModel.NERO,
         firmeware_version="v121",
-        interface="socketcan",
-        channel="can0",
+        interface=default_can_interface(),
+        channel=default_can_channel(),
         bitrate=1_000_000,
     )
-
-
-def read_char():
-    if not sys.stdin.isatty():
-        raise RuntimeError("No real TTY available. Run this script in a system terminal, not the Python debug console.")
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        while True:
-            r, _, _ = select.select([fd], [], [], 0.1)
-            if not r:
-                continue
-            ch = sys.stdin.buffer.read(1)
-            if not ch:
-                continue
-            return ch.decode("utf-8", errors="ignore")
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def get_gripper_state_label(robot, effector):

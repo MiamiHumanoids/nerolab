@@ -1,3 +1,11 @@
-lerobot
-pyAgxArm
+azure-identity
+azure-storage-blob
+lerobot[dataset,viz]
+opencv-python<4.14,>=4.9
+pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm.git
 pyrealsense2
+
+[:sys_platform == "win32"]
+gs_usb>=0.3.1
+libusb-package>=1.0.30
+windows-curses

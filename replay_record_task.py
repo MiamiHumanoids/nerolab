@@ -20,19 +20,25 @@ from task_trajectory import (
     is_amplified_gripper_opening,
     prepare_gripper_for_replay,
     prepare_replay_samples,
+    resample_replay_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
     wait_for_gripper_release_pose,
 )
 
 REPLAY_SPEED_PERCENT = 25
+DATASET_FPS = 30
 
 REPO_ID = "adrian/nero_replayed"
+JOINT_NAMES = [f"joint{i}.pos" for i in range(1, 8)]
+STATE_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
+ACTION_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
+
 FEATURES = {
-    "observation.state": {"dtype": "float32", "shape": (7,), "names": None},
-    "action": {"dtype": "float32", "shape": (8,), "names": None},
-    "observation.images.wrist": {"dtype": "image", "shape": (3, 480, 640), "names": ["channel", "height", "width"]},
-    "observation.images.overview": {"dtype": "image", "shape": (3, 480, 640), "names": ["channel", "height", "width"]},
+    "observation.state": {"dtype": "float32", "shape": (9,), "names": STATE_NAMES},
+    "action": {"dtype": "float32", "shape": (9,), "names": ACTION_NAMES},
+    "observation.images.wrist": {"dtype": "video", "shape": (3, 480, 640), "names": ["channel", "height", "width"]},
+    "observation.images.overview": {"dtype": "video", "shape": (3, 480, 640), "names": ["channel", "height", "width"]},
     "observation.depth": {"dtype": "float32", "shape": (480, 640), "names": None},
 }
 
@@ -47,7 +53,7 @@ def rgb_image(value: object, label: str) -> np.ndarray:
         image = np.transpose(image, (1, 2, 0))
     if image.dtype != np.uint8:
         image = np.clip(image * 255.0 if image.max() <= 1.0 else image, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if image.shape[-1] == 3 else image
+    return image
 
 
 def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -> None:
@@ -55,32 +61,40 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
     samples = prepare_replay_samples(recording)
     if amplified_gripper:
         samples = amplify_gripper_samples(samples)
+    samples = resample_replay_samples(samples, DATASET_FPS)
     task = str(recording.get("task", task_file.stem))
 
     if dataset_root.exists():
         if (dataset_root / "meta" / "info.json").exists():
-            dataset = LeRobotDataset(repo_id=REPO_ID, root=dataset_root, download_videos=False)
-            episode_index = dataset.meta.total_episodes
+            dataset = LeRobotDataset.resume(
+                repo_id=REPO_ID,
+                root=dataset_root,
+                video_backend="pyav",
+            )
         else:
             shutil.rmtree(dataset_root)
             dataset = None
     else:
         dataset = None
     if dataset is None:
-        dataset = LeRobotDataset.create(repo_id=REPO_ID, fps=15, features=FEATURES, robot_type="nero", root=dataset_root, use_videos=True)
-        episode_index = 0
-    dataset.episode_buffer = dataset.create_episode_buffer(episode_index=episode_index)
+        dataset = LeRobotDataset.create(
+            repo_id=REPO_ID,
+            fps=DATASET_FPS,
+            features=FEATURES,
+            robot_type="nero",
+            root=dataset_root,
+            use_videos=True,
+            video_backend="pyav",
+        )
 
     robot = Nero(NeroConfig(
         id="nero_replay_record",
-        can_channel="can0",
         bitrate=1_000_000,
         firmware_version="v121",
         speed_percent=REPLAY_SPEED_PERCENT,
         has_gripper=True,
         has_camera=True,
         has_overview_camera=True,
-        overview_camera_index=0,
         reset_on_connect=False,
     ))
     robot.connect(calibrate=False)
@@ -112,7 +126,13 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
         for index, sample in enumerate(samples):
             target = [float(value) for value in sample["joints"]]
             mode = str(sample.get("gripper_mode", "width"))
+            if mode != "width":
+                raise RuntimeError(
+                    "ML dataset recording requires gripper width-mode samples; "
+                    f"got {mode!r} at frame {index}"
+                )
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
+            gripper_force = float(sample.get("gripper_force", GRIPPER_REPLAY_FORCE))
             robot._arm.move_js(target)
             if amplified_gripper and is_amplified_gripper_opening(sample, previous_grasping):
                 pause_started = time.monotonic()
@@ -129,19 +149,25 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
                 depth = depth[..., 0]
             dataset.add_frame({
                 "observation.state": state,
-                "action": np.concatenate([np.asarray(target, dtype=np.float32), np.asarray([gripper], dtype=np.float32)]),
+                "action": np.concatenate([
+                    np.asarray(target, dtype=np.float32),
+                    np.asarray([gripper, gripper_force], dtype=np.float32),
+                ]),
                 "observation.images.wrist": wrist,
                 "observation.images.overview": overview,
                 "observation.depth": depth,
                 "task": task,
             })
-            combined = np.hstack([wrist, overview])
+            combined = np.hstack([
+                cv2.cvtColor(wrist, cv2.COLOR_RGB2BGR),
+                cv2.cvtColor(overview, cv2.COLOR_RGB2BGR),
+            ])
             cv2.putText(combined, f"Replay recording {index + 1}/{len(samples)}  q: stop", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
             cv2.imshow("NERO replay recording", combined)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 stop_requested = True
                 break
-            next_time = float(samples[index + 1]["time"]) if index + 1 < len(samples) else float(sample["time"]) + 1.0 / 15.0
+            next_time = float(samples[index + 1]["time"]) if index + 1 < len(samples) else float(sample["time"]) + 1.0 / DATASET_FPS
             deadline = replay_started + next_time
             while time.monotonic() < deadline:
                 time.sleep(0.005)

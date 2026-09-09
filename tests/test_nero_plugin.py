@@ -1,4 +1,5 @@
 import importlib
+from unittest.mock import patch
 
 
 def test_package_is_importable():
@@ -30,3 +31,13 @@ def test_cli_entry_point_exists():
     eps = md.entry_points(group="console_scripts")
     names = {ep.name for ep in eps}
     assert "lerobot-nero" in names
+
+
+def test_config_uses_windows_can_backend_defaults():
+    from lerobot_robot_nero.config import NeroConfig
+
+    with patch("lerobot_robot_nero.config.platform.system", return_value="Windows"):
+        cfg = NeroConfig(id="test-arm")
+
+    assert cfg.can_interface == "gs_usb"
+    assert cfg.can_channel == "0"

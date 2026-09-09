@@ -100,14 +100,12 @@ def wait_for_fresh_gripper_feedback(
 def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     robot = Nero(NeroConfig(
         id="nero_teach",
-        can_channel="can0",
         bitrate=1_000_000,
         firmware_version="v121",
         speed_percent=25,
         has_gripper=True,
         has_camera=True,
         has_overview_camera=True,
-        overview_camera_index=0,
         reset_on_connect=False,
     ))
     robot.connect(calibrate=False)

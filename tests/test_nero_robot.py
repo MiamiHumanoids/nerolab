@@ -1,5 +1,90 @@
+from unittest.mock import MagicMock, patch
+
+import can.interfaces
+import pytest
+
 from lerobot_robot_nero import Nero
 from lerobot_robot_nero.config import NeroConfig
+
+
+def test_windows_can_backend_detects_configured_device_channel():
+    cfg = NeroConfig(id="test-arm", can_interface="gs_usb", can_channel="0")
+    robot = Nero(cfg)
+
+    with patch(
+        "lerobot_robot_nero.robot.can.detect_available_configs",
+        return_value=[{"interface": "gs_usb", "channel": 0}],
+    ):
+        assert robot.check_can_interface() is True
+
+
+def test_windows_can_backend_reports_missing_device():
+    cfg = NeroConfig(id="test-arm", can_interface="gs_usb", can_channel="0")
+    robot = Nero(cfg)
+
+    with patch(
+        "lerobot_robot_nero.robot.can.detect_available_configs", return_value=[]
+    ):
+        assert robot.check_can_interface() is False
+
+
+def test_windows_arm_uses_gs_usb_backend():
+    cfg = NeroConfig(id="test-arm", can_interface="gs_usb", can_channel="0")
+    robot = Nero(cfg)
+    arm = MagicMock()
+    arm.enable.return_value = True
+
+    with (
+        patch.object(robot, "check_can_interface", return_value=True),
+        patch("lerobot_robot_nero.robot.create_agx_arm_config", return_value={}) as create_config,
+        patch("lerobot_robot_nero.robot.AgxArmFactory.create_arm", return_value=arm),
+    ):
+        robot.connect()
+
+    assert create_config.call_args.kwargs["interface"] == "gs_usb"
+    assert can.interfaces.BACKENDS["gs_usb"] == (
+        "lerobot_robot_nero.windows_gs_usb",
+        "WindowsGsUsbBus",
+    )
+
+
+def test_enable_can_feedback_preserves_cached_mode():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class Reporting:
+        INVALID = 0
+        ENABLE = 1
+
+    class Enums:
+        pass
+
+    Enums.CanActiveMsgReporting = Reporting
+
+    class Mode:
+        move_mode = 2
+        enable_can_push = Reporting.INVALID
+
+    Mode.Enums = Enums
+
+    class DummyArm:
+        def __init__(self):
+            self._msg_mode = Mode()
+            self.sent = []
+
+        def _set_mode(self):
+            self.sent.append(
+                (self._msg_mode.move_mode, self._msg_mode.enable_can_push)
+            )
+
+    robot._arm = DummyArm()
+
+    with patch("lerobot_robot_nero.robot.time.sleep"):
+        robot._enable_can_feedback()
+
+    assert robot._arm.sent == [(255, Reporting.ENABLE)]
+    assert robot._arm._msg_mode.move_mode == 2
+    assert robot._arm._msg_mode.enable_can_push == Reporting.ENABLE
 
 
 def test_joint_key_mapping_and_action_conversion():
@@ -178,9 +263,9 @@ def test_robot_observation_and_action_keys_match_lerobot_schema():
     assert "observation.images.wrist" in obs_features
     assert "action" in action_features
 
-    assert obs_features["observation.state"] == (7,)
+    assert obs_features["observation.state"] == (9,)
     assert obs_features["observation.images.wrist"] == (480, 640, 3)
-    assert action_features["action"] == (7,)
+    assert action_features["action"] == (9,)
 
 
 def test_robot_can_advertise_overview_camera_feature():
@@ -188,6 +273,62 @@ def test_robot_can_advertise_overview_camera_feature():
     robot = Nero(cfg)
 
     assert robot.observation_features["observation.images.overview"] == (480, 640, 3)
+
+
+def test_observation_restarts_wrist_before_overview_camera():
+    cfg = NeroConfig(
+        id="test-arm",
+        can_channel="can0",
+        has_camera=True,
+        has_overview_camera=True,
+    )
+    robot = Nero(cfg)
+    events = []
+
+    class DummyArm:
+        def is_connected(self):
+            return True
+
+        def get_joint_angles(self):
+            return [0.0] * 7
+
+    class WristCamera:
+        is_connected = False
+        height = 480
+        width = 640
+
+        def connect(self):
+            events.append("wrist_connect")
+            self.is_connected = True
+
+        def capture_frame(self):
+            return None, None
+
+    class OverviewCamera:
+        is_connected = True
+
+        def disconnect(self):
+            events.append("overview_disconnect")
+            self.is_connected = False
+
+        def connect(self):
+            events.append("overview_connect")
+            self.is_connected = True
+
+        def capture_frame(self):
+            return None
+
+    robot._arm = DummyArm()
+    robot._camera = WristCamera()
+    robot._overview_camera = OverviewCamera()
+
+    robot.get_observation()
+
+    assert events == [
+        "overview_disconnect",
+        "wrist_connect",
+        "overview_connect",
+    ]
 
 
 def test_send_action_accepts_standard_lerobot_action_format():
@@ -204,13 +345,68 @@ def test_send_action_accepts_standard_lerobot_action_format():
         def move_j(self, target):
             self.target = list(target)
 
+    class DummyEffector:
+        def __init__(self):
+            self.command = None
+
+        def move_gripper_m(self, value, force):
+            self.command = (value, force)
+
     dummy = DummyArm()
     robot._arm = dummy
+    effector = DummyEffector()
+    robot._gripper_effector = effector
 
-    result = robot.send_action({"action": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]})
+    result = robot.send_action(
+        {"action": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.08, 3.0]}
+    )
 
-    assert result == {"action": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
+    assert result == {
+        "action": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.08, 3.0]
+    }
     assert dummy.target == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    assert effector.command == (0.08, 3.0)
+
+
+def test_gripper_feedback_reports_width_and_force():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class Message:
+        mode = "width"
+        value = 0.042
+        force = 2.5
+
+    class Status:
+        msg = Message()
+
+    effector = MagicMock()
+    effector.get_gripper_status.return_value = Status()
+    robot._arm = MagicMock()
+    robot._gripper_effector = effector
+
+    assert robot.get_gripper_feedback() == (0.042, 2.5)
+
+
+def test_gripper_feedback_rejects_angle_mode():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+
+    class Message:
+        mode = "angle"
+        value = 30.0
+        force = 2.5
+
+    class Status:
+        msg = Message()
+
+    effector = MagicMock()
+    effector.get_gripper_status.return_value = Status()
+    robot._arm = MagicMock()
+    robot._gripper_effector = effector
+
+    with pytest.raises(RuntimeError, match="width-mode feedback is required"):
+        robot.get_gripper_feedback()
 
 
 def test_gripper_helper_methods_call_sdk_effectors():
@@ -225,6 +421,10 @@ def test_gripper_helper_methods_call_sdk_effectors():
             self.calls.append((value, force))
 
     class DummyArm:
+        class OPTIONS:
+            class EFFECTOR:
+                AGX_GRIPPER = "agx_gripper"
+
         def __init__(self):
             self.effectors = {}
 

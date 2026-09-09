@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 import tkinter as tk
-import torch
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ import re
 from tkinter import filedialog, messagebox, ttk
 
 from lerobot_robot_nero import Nero, NeroConfig
+from lerobot_robot_nero.azure_storage import AzureNeroStorage
 from task_trajectory import (
     SAFE_BICEP_JOINTS,
     format_cli_float,
@@ -27,7 +27,7 @@ from task_trajectory import (
     safe_bicep_recovery_pose,
 )
 
-APP_BUILD = "2026-09-06-tight-grasp-release-61"
+APP_BUILD = "2026-09-09-taskbar-robot-icon-65"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 UPRIGHT_RESET_JOINTS = [0.0] * 7
@@ -54,12 +54,104 @@ TASK_REPLAY_RECORDER = PROJECT_ROOT / "replay_record_task.py"
 TASK_REPLAYER = PROJECT_ROOT / "replay_task.py"
 POLICY_RUNNER = PROJECT_ROOT / "run_smolvla_nero.py"
 EPISODE_DELETER = PROJECT_ROOT / "delete_dataset_episode.py"
-RERUN = Path.home() / ".local" / "bin" / "lerobot-dataset-viz"
-LE_ROBOT_TRAIN = Path.home() / ".local" / "bin" / "lerobot-train"
-LE_ROBOT_EVAL = Path.home() / ".local" / "bin" / "lerobot-eval"
+
+
+def resolve_cli(name: str) -> str:
+    executable_name = f"{name}.exe" if os.name == "nt" else name
+    environment_executable = Path(sys.executable).resolve().parent / executable_name
+    if environment_executable.exists():
+        return str(environment_executable)
+    return shutil.which(name) or name
+
+
+RERUN = resolve_cli("lerobot-dataset-viz")
+LE_ROBOT_TRAIN = resolve_cli("lerobot-train")
+LE_ROBOT_EVAL = resolve_cli("lerobot-eval")
+WINDOWS_INSTANCE_MUTEX = "Local\\NeroLabGui"
+WINDOWS_APP_USER_MODEL_ID = "NeroLab.Desktop"
+ROBOT_ARM_ICON = PROJECT_ROOT / "assets" / "nero_robot_arm.ico"
+
+
+def configure_windows_app_identity() -> None:
+    if os.name != "nt":
+        return
+
+    import ctypes
+
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+        WINDOWS_APP_USER_MODEL_ID
+    )
+
+
+def focus_existing_nero_lab_window() -> bool:
+    if os.name != "nt":
+        return False
+
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    found = False
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def visit_window(window_handle, _parameter):
+        nonlocal found
+        title_length = user32.GetWindowTextLengthW(window_handle)
+        if title_length <= 0:
+            return True
+        title = ctypes.create_unicode_buffer(title_length + 1)
+        user32.GetWindowTextW(window_handle, title, title_length + 1)
+        if title.value == "NERO Lab":
+            user32.ShowWindow(window_handle, 9)
+            user32.SetForegroundWindow(window_handle)
+            found = True
+            return False
+        return True
+
+    user32.EnumWindows(visit_window, 0)
+    return found
+
+
+def acquire_windows_instance_mutex() -> object | None:
+    if os.name != "nt":
+        return object()
+
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    ctypes.set_last_error(0)
+    mutex = kernel32.CreateMutexW(None, False, WINDOWS_INSTANCE_MUTEX)
+    if not mutex:
+        return object()
+    if ctypes.get_last_error() == 183:
+        focus_existing_nero_lab_window()
+        kernel32.CloseHandle(mutex)
+        return None
+    return mutex
+
+
+def report_startup_failure() -> None:
+    error_text = traceback.format_exc()
+    log_path = Path.home() / "Nero" / "nero_lab_startup_error.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(error_text)
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            f"NERO Lab could not start. Details were saved to:\n{log_path}\n\n{error_text[-1200:]}",
+            "NERO Lab startup error",
+            0x10,
+        )
 
 
 def auto_device() -> str:
+    import torch
+
     if torch.cuda.is_available():
         return "cuda"
     if hasattr(torch, "xpu") and torch.xpu.is_available():
@@ -100,7 +192,7 @@ def read_dataset_info(root: Path) -> DatasetInfo:
             action = info.get("features", {}).get("action", {})
             shape = action.get("shape")
             action_dim = int(shape[0]) if shape else None
-            gripper = action_dim == 8
+            gripper = action_dim == 9
         except (OSError, ValueError, TypeError, KeyError):
             gripper = False
     else:
@@ -112,6 +204,8 @@ class NeroLab(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("NERO Lab")
+        if os.name == "nt" and ROBOT_ARM_ICON.exists():
+            self.iconbitmap(str(ROBOT_ARM_ICON))
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         window_width = int(screen_width * 0.95)
@@ -123,7 +217,11 @@ class NeroLab(tk.Tk):
         )
         self.minsize(1300, 850)
         self.process: subprocess.Popen[str] | None = None
+        self.azure_storage: AzureNeroStorage | None = None
+        self.azure_sync_targets: dict[str, tuple[Path, str]] = {}
         self.robot: Nero | None = None
+        self.windows_can_bus: object | None = None
+        self.can_check_pending = False
         self.activity_trace: list[str] = []
         self.safe_bicep_position_reached = False
         self.slider_motion_job: str | None = None
@@ -154,18 +252,40 @@ class NeroLab(tk.Tk):
         self.device_var = tk.StringVar(value="auto")
         self.arm_status_var = tk.StringVar(value="Arm status: not connected")
         self.arm_status_label: ttk.Label | None = None
+        self.can_status_var = tk.StringVar(value="CAN status: checking")
+        self.can_status_label: ttk.Label | None = None
+        self.start_can_button: ttk.Button | None = None
         self.status_var = tk.StringVar(value="Ready")
         self.protocol("WM_DELETE_WINDOW", self.close_application)
         self._build_ui()
         self.log_message(f"NERO Lab build {APP_BUILD} running from {Path(__file__).resolve()}")
+        self.after(0, self.show_main_window)
+        self.after(100, self.initialize_services)
+
+    def initialize_services(self) -> None:
+        self._configure_azure_storage()
         self.refresh_datasets()
         self.refresh_tasks()
+        if sys.platform.startswith("linux"):
+            self.after(100, self.refresh_can_status)
+        elif os.name == "nt":
+            self.set_can_status("CAN status: not started (click Start CAN)", "#8a5a00")
+
+    def show_main_window(self) -> None:
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.focus_force()
+        if os.name == "nt":
+            self.attributes("-topmost", True)
+            self.after(300, self.attributes, "-topmost", False)
 
     def close_application(self) -> None:
         if self.robot is not None and self.robot.is_connected:
             self.disconnect_robot()
             if self.robot is not None:
                 return
+        self.stop_windows_can(log=False)
         self.destroy()
 
     def report_callback_exception(self, exc_type, exc_value, exc_traceback) -> None:
@@ -268,6 +388,37 @@ class NeroLab(tk.Tk):
         self._build_inference_tab(inference_tab)
 
     def _build_arm_tab(self, parent: ttk.Frame) -> None:
+        if os.name == "nt" or sys.platform.startswith("linux"):
+            can_title = (
+                "Windows CAN (GS-USB)"
+                if os.name == "nt"
+                else "Linux CAN (SocketCAN can0)"
+            )
+            can_frame = ttk.LabelFrame(parent, text=can_title, padding=10)
+            can_frame.pack(fill="x", pady=(0, 10))
+            self.can_status_label = ttk.Label(
+                can_frame,
+                textvariable=self.can_status_var,
+                foreground="#555555",
+            )
+            self.can_status_label.pack(side="left", fill="x", expand=True)
+            self.start_can_button = ttk.Button(
+                can_frame,
+                text="Start CAN",
+                command=self.start_can,
+            )
+            self.start_can_button.pack(side="right")
+            ttk.Button(
+                can_frame,
+                text="Stop CAN",
+                command=self.stop_can,
+            ).pack(side="right", padx=8)
+            ttk.Button(
+                can_frame,
+                text="Refresh status",
+                command=self.refresh_can_status,
+            ).pack(side="right")
+
         connection = ttk.Frame(parent)
         connection.pack(fill="x")
         ttk.Button(connection, text="Connect arm", command=self.connect_robot).pack(side="left")
@@ -342,9 +493,9 @@ class NeroLab(tk.Tk):
         if self.robot is not None and self.robot.is_connected:
             self.log_message("Arm is already connected")
             return
+        self.stop_windows_can(log=False)
         self.robot = Nero(NeroConfig(
             id="nero_lab",
-            can_channel="can0",
             bitrate=1_000_000,
             firmware_version="v121",
             speed_percent=100,
@@ -371,6 +522,7 @@ class NeroLab(tk.Tk):
         else:
             self.set_arm_status_display("Arm status: connected")
         self.log_message("Arm connected")
+        self.set_can_status("CAN status: RUNNING (arm connected)", "#008000")
         self.log_arm_debug("connect complete")
 
     def disconnect_robot(self, emergency_brake: bool = True, disable_arm: bool = True) -> None:
@@ -396,6 +548,191 @@ class NeroLab(tk.Tk):
             self.robot = None
         self.arm_status_var.set("Arm status: not connected")
         self.log_message("Arm disconnected")
+        if os.name == "nt":
+            self.set_can_status("CAN status: available (not started)", "#8a5a00")
+        elif sys.platform.startswith("linux"):
+            self.refresh_can_status()
+
+    def set_can_status(self, text: str, color: str = "#555555") -> None:
+        self.can_status_var.set(text)
+        if self.can_status_label is not None:
+            self.can_status_label.configure(foreground=color)
+
+    def refresh_can_status(self) -> None:
+        if self.can_check_pending:
+            return
+        if self.robot is not None and self.robot.is_connected:
+            self.set_can_status("CAN status: RUNNING (arm connected)", "#008000")
+            return
+        if os.name == "nt" and self.windows_can_bus is not None:
+            self.set_can_status("CAN status: RUNNING (channel 0)", "#008000")
+            return
+
+        if sys.platform.startswith("linux"):
+            self.can_check_pending = True
+            self.set_can_status("CAN status: checking can0", "#555555")
+
+            def check_linux() -> None:
+                from lerobot_robot_nero.linux_socketcan import get_socketcan_status
+
+                status = get_socketcan_status("can0")
+                self.after(0, self._finish_linux_can_status_check, status)
+
+            threading.Thread(
+                target=check_linux,
+                name="linux-can-status",
+                daemon=True,
+            ).start()
+            return
+        if os.name != "nt":
+            return
+        self.set_can_status("CAN status: not started (click Start CAN)", "#8a5a00")
+
+    def _finish_linux_can_status_check(self, status: object) -> None:
+        self.can_check_pending = False
+        if self.robot is not None and self.robot.is_connected:
+            self.set_can_status("CAN status: RUNNING (arm connected)", "#008000")
+            return
+        if not status.detected:
+            self.set_can_status(f"CAN status: can0 not detected - {status.error}", "#cc0000")
+        elif not status.is_can:
+            self.set_can_status("CAN status: can0 is not a SocketCAN interface", "#cc0000")
+        elif status.is_up:
+            bitrate = f"{status.bitrate:,} bps" if status.bitrate else "bitrate unknown"
+            color = "#008000" if status.bitrate == 1_000_000 else "#8a5a00"
+            self.set_can_status(f"CAN status: RUNNING (can0, {bitrate})", color)
+        else:
+            self.set_can_status("CAN status: can0 available (click Start CAN)", "#8a5a00")
+
+    def start_can(self) -> None:
+        if os.name == "nt":
+            self.start_windows_can()
+        elif sys.platform.startswith("linux"):
+            self.start_linux_can()
+
+    def stop_can(self) -> None:
+        if os.name == "nt":
+            self.stop_windows_can()
+        elif sys.platform.startswith("linux"):
+            self.stop_linux_can()
+
+    def start_linux_can(self) -> None:
+        if self.robot is not None and self.robot.is_connected:
+            self.set_can_status("CAN status: RUNNING (arm connected)", "#008000")
+            self.log_message("SocketCAN is already running through the arm connection")
+            return
+        if self.start_can_button is not None:
+            self.start_can_button.configure(state="disabled")
+        self.set_can_status("CAN status: starting can0 at 1 Mbps", "#555555")
+
+        def start() -> None:
+            try:
+                from lerobot_robot_nero.linux_socketcan import start_socketcan
+
+                start_socketcan("can0", 1_000_000)
+                error = None
+            except Exception as exc:
+                error = str(exc)
+            self.after(0, self._finish_linux_can_action, "start", error)
+
+        threading.Thread(target=start, name="linux-can-start", daemon=True).start()
+
+    def stop_linux_can(self) -> None:
+        if self.robot is not None and self.robot.is_connected:
+            self.log_message("Disconnect the arm before stopping SocketCAN")
+            return
+        self.set_can_status("CAN status: stopping can0", "#555555")
+
+        def stop() -> None:
+            try:
+                from lerobot_robot_nero.linux_socketcan import stop_socketcan
+
+                stop_socketcan("can0")
+                error = None
+            except Exception as exc:
+                error = str(exc)
+            self.after(0, self._finish_linux_can_action, "stop", error)
+
+        threading.Thread(target=stop, name="linux-can-stop", daemon=True).start()
+
+    def _finish_linux_can_action(self, action: str, error: str | None) -> None:
+        if self.start_can_button is not None:
+            self.start_can_button.configure(state="normal")
+        if error:
+            self.set_can_status(f"CAN status: {action} failed - {error}", "#cc0000")
+            self.log_message(f"SocketCAN {action} failed: {error}")
+            return
+        self.log_message(f"SocketCAN can0 {action} completed")
+        self.refresh_can_status()
+
+    def start_windows_can(self) -> None:
+        if os.name != "nt":
+            return
+        if self.robot is not None and self.robot.is_connected:
+            self.set_can_status("CAN status: RUNNING (arm connected)", "#008000")
+            self.log_message("CAN is already running through the arm connection")
+            return
+        if self.windows_can_bus is not None:
+            self.log_message("CAN channel 0 is already running")
+            return
+        if self.start_can_button is not None:
+            self.start_can_button.configure(state="disabled")
+        self.set_can_status("CAN status: starting channel 0", "#555555")
+
+        def start() -> None:
+            try:
+                import can
+
+                from lerobot_robot_nero.windows_gs_usb import register_windows_gs_usb
+
+                register_windows_gs_usb()
+                bus = can.Bus(interface="gs_usb", channel=0, bitrate=1_000_000)
+                error = None
+            except Exception as exc:
+                bus = None
+                error = str(exc)
+            self.after(0, self._finish_can_start, bus, error)
+
+        threading.Thread(target=start, name="windows-can-start", daemon=True).start()
+
+    def _finish_can_start(self, bus: object | None, error: str | None) -> None:
+        if self.start_can_button is not None:
+            self.start_can_button.configure(state="normal")
+        if bus is None:
+            from lerobot_robot_nero.windows_gs_usb import describe_windows_can_error
+
+            detail = describe_windows_can_error(error or "Unknown CAN initialization error")
+            self.set_can_status(f"CAN status: failed - {detail}", "#cc0000")
+            self.log_message(f"CAN start failed: {detail}")
+            return
+        if self.robot is not None and self.robot.is_connected:
+            shutdown = getattr(bus, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
+            self.set_can_status("CAN status: RUNNING (arm connected)", "#008000")
+            return
+        self.windows_can_bus = bus
+        self.set_can_status("CAN status: RUNNING (channel 0)", "#008000")
+        self.log_message("CAN channel 0 started at 1 Mbps")
+
+    def stop_windows_can(self, log: bool = True) -> None:
+        bus = self.windows_can_bus
+        if bus is None:
+            if os.name == "nt" and self.robot is not None and self.robot.is_connected and log:
+                self.log_message("CAN is owned by the arm; disconnect the arm to stop it")
+            return
+        self.windows_can_bus = None
+        try:
+            shutdown = getattr(bus, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
+            self.set_can_status("CAN status: available (not started)", "#8a5a00")
+            if log:
+                self.log_message("CAN channel 0 stopped")
+        except Exception as exc:
+            self.set_can_status(f"CAN status: stop error - {exc}", "#cc0000")
+            if log:
+                self.log_message(f"CAN stop failed: {exc}")
 
     def confirm_dangerous_disconnect(self) -> bool:
         dialog = tk.Toplevel(self)
@@ -905,7 +1242,62 @@ class NeroLab(tk.Tk):
         self.update_idletasks()
         self.status_var.set("Full session activity trace copied to clipboard")
 
+    def _configure_azure_storage(self) -> None:
+        try:
+            self.azure_storage = AzureNeroStorage.from_environment(Path.home() / "Nero")
+        except Exception as exc:
+            self.log_message(
+                "Azure storage unavailable; using local cache: "
+                f"{AzureNeroStorage.describe_error(exc)}"
+            )
+            return
+        if self.azure_storage is None:
+            self.log_message("Azure storage is not configured; using local storage")
+        else:
+            self.log_message(
+                f"Azure storage enabled: container={self.azure_storage.container.container_name}"
+            )
+
+    def _sync_from_azure(self, category: str) -> None:
+        if self.azure_storage is None:
+            return
+        try:
+            count = self.azure_storage.sync_down(category)
+            self.log_message(f"Downloaded {count} Azure {category} file(s)")
+        except Exception as exc:
+            self.log_message(
+                f"Could not download Azure {category}: "
+                f"{AzureNeroStorage.describe_error(exc)}"
+            )
+
+    def _upload_to_azure(self, path: Path, category: str) -> None:
+        if self.azure_storage is None:
+            return
+        try:
+            count = self.azure_storage.upload_path(path, category)
+            self.after(0, self.log_message, f"Uploaded {count} Azure {category} file(s)")
+        except Exception as exc:
+            self.after(
+                0,
+                self.log_message,
+                f"Could not upload Azure {category}: "
+                f"{AzureNeroStorage.describe_error(exc)}",
+            )
+
+    def _delete_from_azure(self, path: Path, category: str) -> None:
+        if self.azure_storage is None:
+            return
+        try:
+            count = self.azure_storage.delete_path(path, category)
+            self.log_message(f"Deleted {count} Azure {category} blob(s)")
+        except Exception as exc:
+            self.log_message(
+                f"Could not delete Azure {category}: "
+                f"{AzureNeroStorage.describe_error(exc)}"
+            )
+
     def refresh_datasets(self) -> None:
+        self._sync_from_azure("datasets")
         DATASET_BASE.mkdir(parents=True, exist_ok=True)
         dataset_paths = list(DATASET_BASE.glob("nero_manual__*")) + list(DATASET_BASE.glob("nero_replayed__*"))
         self.datasets = [read_dataset_info(path) for path in sorted(set(dataset_paths)) if path.is_dir()]
@@ -939,6 +1331,7 @@ class NeroLab(tk.Tk):
         self._update_training_estimate()
 
     def refresh_tasks(self) -> None:
+        self._sync_from_azure("tasks")
         TASK_BASE.mkdir(parents=True, exist_ok=True)
         self.taught_task_files = sorted(
             TASK_BASE.glob("*.json"),
@@ -981,6 +1374,7 @@ class NeroLab(tk.Tk):
         if not messagebox.askyesno("Delete taught task", f"Delete this taught task permanently?\n\n{task_file}"):
             return
         task_file.unlink(missing_ok=True)
+        self._delete_from_azure(task_file, "tasks")
         if self.taught_task_file == task_file:
             self.taught_task_file = None
         self.refresh_tasks()
@@ -1015,7 +1409,7 @@ class NeroLab(tk.Tk):
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
         if item:
-            self.details.insert("end", f"Task: {item.task}\nEpisodes: {item.episodes}\nFrames: {item.frames}\nAction width: {item.action_dim or 'unknown'}\nGripper: {'present' if item.gripper else 'missing'}\nPath: {item.root}")
+            self.details.insert("end", f"Task: {item.task}\nEpisodes: {item.episodes}\nFrames: {item.frames}\nAction dimensions: {item.action_dim or 'unknown'}\nGripper width/force: {'present' if item.gripper else 'missing'}\nPath: {item.root}")
         self.details.configure(state="disabled")
 
     def selected_complete(self) -> DatasetInfo | None:
@@ -1030,10 +1424,15 @@ class NeroLab(tk.Tk):
 
     def start_process(self, command: list[str], label: str, environment: dict[str, str] | None = None) -> None:
         if self.process and self.process.poll() is None:
+            self.azure_sync_targets.pop(label, None)
             messagebox.showwarning("Busy", "A NERO Lab command is already running.")
             return
         self.log_message("$ " + " ".join(command))
         process_environment = os.environ.copy()
+        environment_bin = str(Path(sys.executable).resolve().parent)
+        process_environment["PATH"] = os.pathsep.join(
+            (environment_bin, process_environment.get("PATH", ""))
+        )
         if environment:
             process_environment.update(environment)
         self.process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=process_environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -1047,6 +1446,9 @@ class NeroLab(tk.Tk):
                 self.after(0, self.refresh_tasks)
         code = process.wait()
         self.after(0, self.log_message, f"{label} exited with code {code}")
+        sync_target = self.azure_sync_targets.pop(label, None)
+        if code == 0 and sync_target is not None:
+            self._upload_to_azure(*sync_target)
         if label == "Teach task" and code == 0:
             self.after(0, self.refresh_tasks)
             self.after(0, self.connect_robot)
@@ -1058,7 +1460,12 @@ class NeroLab(tk.Tk):
         if not task:
             messagebox.showwarning("Task required", "Enter a task instruction first.")
             return
-        self.start_process([sys.executable, str(RECORDER), "--task", task], "Recorder")
+        dataset_root = DATASET_BASE / f"nero_manual__{self._task_slug(task)}__30fps"
+        self.azure_sync_targets["Recorder"] = (dataset_root, "datasets")
+        self.start_process(
+            [sys.executable, str(RECORDER), "--task", task, "--dataset-root", str(dataset_root)],
+            "Recorder",
+        )
 
     @staticmethod
     def _task_slug(task: str) -> str:
@@ -1132,6 +1539,7 @@ class NeroLab(tk.Tk):
         TASK_BASE.mkdir(parents=True, exist_ok=True)
         output = TASK_BASE / f"{self._task_slug(task)}.json"
         self.taught_task_file = output
+        self.azure_sync_targets["Teach task"] = (output, "tasks")
         self.start_process([
             sys.executable,
             str(TASK_TEACHER),
@@ -1156,10 +1564,11 @@ class NeroLab(tk.Tk):
         self.clear_activity_log()
         if not self._prepare_task_process(emergency_brake=False):
             return
-        dataset_root = DATASET_BASE / f"nero_replayed__{self._task_slug(task)}"
+        dataset_root = DATASET_BASE / f"nero_replayed__{self._task_slug(task)}__30fps"
         command = [sys.executable, str(TASK_REPLAY_RECORDER), "--task-file", str(task_file), "--dataset-root", str(dataset_root)]
         if self.amplified_gripper_var.get():
             command.append("--amplified-gripper")
+        self.azure_sync_targets["Replay trained task"] = (dataset_root, "datasets")
         self.start_process(
             command,
             "Replay trained task",
@@ -1194,7 +1603,18 @@ class NeroLab(tk.Tk):
     def open_rerun(self) -> None:
         item = self.selected_complete()
         if item:
-            command = [str(RERUN), "--repo-id", "adrian/nero_manual", "--root", str(item.root), "--episode-index", str(self.selected_episode), "--mode", "local"]
+            if not Path(RERUN).exists() and shutil.which(RERUN) is None:
+                messagebox.showerror(
+                    "LeRobot viewer not found",
+                    "Install the project environment with: python -m pip install -e .",
+                )
+                return
+            repo_id = (
+                "adrian/nero_replayed"
+                if item.root.name.startswith("nero_replayed__")
+                else "adrian/nero_manual"
+            )
+            command = [str(RERUN), "--repo-id", repo_id, "--root", str(item.root), "--episode-index", str(self.selected_episode), "--mode", "local"]
             self.start_process(command, "Rerun")
 
     def delete_dataset(self) -> None:
@@ -1204,6 +1624,7 @@ class NeroLab(tk.Tk):
         if not messagebox.askyesno("Delete dataset", f"Delete this dataset permanently?\n\n{item.root}"):
             return
         shutil.rmtree(item.root)
+        self._delete_from_azure(item.root, "datasets")
         self.log_message(f"Deleted {item.root}")
         self.refresh_datasets()
 
@@ -1225,6 +1646,7 @@ class NeroLab(tk.Tk):
             "--dataset-root", str(item.root),
             "--episode-index", str(self.selected_episode),
         ]
+        self.azure_sync_targets["Episode deletion"] = (item.root, "datasets")
         self.start_process(command, "Episode deletion")
 
     def browse_policy(self) -> None:
@@ -1237,7 +1659,7 @@ class NeroLab(tk.Tk):
         if item is None:
             return
         if not item.gripper:
-            messagebox.showwarning("Gripper data missing", "Select an 8D dataset containing gripper width before training.")
+            messagebox.showwarning("Gripper data missing", "Select a 9D dataset containing gripper width and force before training.")
             return
         try:
             steps = int(self.steps_var.get().replace(",", "").strip())
@@ -1276,7 +1698,7 @@ class NeroLab(tk.Tk):
             messagebox.showwarning("Policy required", "Select a complete gripper-enabled dataset and choose a policy checkpoint.")
             return
         if not item.gripper:
-            messagebox.showwarning("Gripper data missing", "The selected dataset does not contain the required 8D action.")
+            messagebox.showwarning("Gripper data missing", "The selected dataset does not contain the required 9D width/force action.")
             return
         checkpoint_path = Path(checkpoint)
         if not checkpoint_path.exists():
@@ -1305,4 +1727,10 @@ class NeroLab(tk.Tk):
 
 
 if __name__ == "__main__":
-    NeroLab().mainloop()
+    configure_windows_app_identity()
+    instance_mutex = acquire_windows_instance_mutex()
+    if instance_mutex is not None:
+        try:
+            NeroLab().mainloop()
+        except Exception:
+            report_startup_failure()

@@ -44,14 +44,12 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
 
     robot = Nero(NeroConfig(
         id="nero_task_replay",
-        can_channel="can0",
         bitrate=1_000_000,
         firmware_version="v121",
         speed_percent=REPLAY_SPEED_PERCENT,
         has_gripper=True,
         has_camera=True,
         has_overview_camera=True,
-        overview_camera_index=0,
         reset_on_connect=False,
     ))
     robot.connect(calibrate=False)

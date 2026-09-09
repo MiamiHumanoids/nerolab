@@ -5,13 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lerobot_robot_nero"
 version = "0.1.0"
-description = "LeRobot hardware plugin for the Agilex NERO 7-DOF arm with gripper and Intel RealSense D405 camera over SocketCAN"
+description = "Cross-platform LeRobot hardware plugin for the Agilex NERO 7-DOF arm, gripper, and Intel RealSense D405 camera"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "lerobot",
-  "pyAgxArm",
+  "azure-identity",
+  "azure-storage-blob",
+  "lerobot[dataset,viz]",
+  "opencv-python>=4.9,<4.14",
+  "pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm.git",
   "pyrealsense2",
+  "gs_usb>=0.3.1 ; sys_platform == 'win32'",
+  "libusb-package>=1.0.30 ; sys_platform == 'win32'",
+  "windows-curses ; sys_platform == 'win32'",
 ]
 
 [project.scripts]

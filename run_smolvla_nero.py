@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a LeRobot SmolVLA checkpoint on the NERO arm with a guarded 8D adapter."""
+"""Run a LeRobot SmolVLA checkpoint on NERO with a guarded 9D adapter."""
 
 from __future__ import annotations
 
@@ -17,6 +17,9 @@ from lerobot_robot_nero import Nero, NeroConfig
 JOINT_COUNT = 7
 GRIPPER_MIN_M = 0.0
 GRIPPER_MAX_M = 0.1
+GRIPPER_FORCE_MIN = 0.0
+GRIPPER_FORCE_MAX = 30.0
+POLICY_ACTION_SIZE = 9
 
 
 def auto_device() -> str:
@@ -54,8 +57,14 @@ def build_policy(checkpoint: Path, dataset_root: Path, device: str):
         repo_id="adrian/nero_manual",
         root=dataset_root,
     )
-    if metadata.features.get("action", {}).get("shape", [0])[0] != 8:
-        raise ValueError("Selected dataset must contain an 8D action: 7 joints plus gripper width.")
+    if metadata.features.get("observation.state", {}).get("shape", [0])[0] != 9:
+        raise ValueError(
+            "Selected dataset must contain a 9D state: 7 joints, gripper width, and force."
+        )
+    if metadata.features.get("action", {}).get("shape", [0])[0] != POLICY_ACTION_SIZE:
+        raise ValueError(
+            "Selected dataset must contain a 9D action: 7 joints, gripper width, and force."
+        )
     config = make_policy_config(
         "smolvla",
         pretrained_path=checkpoint,
@@ -67,7 +76,7 @@ def build_policy(checkpoint: Path, dataset_root: Path, device: str):
         pretrained_path=str(checkpoint),
         dataset_stats=metadata.stats,
     )
-    return policy, preprocessor, postprocessor
+    return metadata, policy, preprocessor, postprocessor
 
 
 def run(checkpoint: Path, dataset_root: Path, task: str, device: str, confirm: bool, dry_run: bool, fast_motion: bool) -> None:
@@ -75,15 +84,17 @@ def run(checkpoint: Path, dataset_root: Path, task: str, device: str, confirm: b
         raise SystemExit("Hardware motion is blocked. Re-run with --confirm, or use --dry-run.")
 
     device = auto_device() if device == "auto" else device
-    policy, preprocessor, postprocessor = build_policy(checkpoint, dataset_root, device)
+    metadata, policy, preprocessor, postprocessor = build_policy(
+        checkpoint, dataset_root, device
+    )
     robot = Nero(NeroConfig(
         id="smolvla_nero",
-        can_channel="can0",
         bitrate=1_000_000,
         firmware_version="v121",
         speed_percent=100,
         has_gripper=True,
         has_camera=True,
+        has_overview_camera=True,
     ))
     robot.connect(calibrate=False)
     robot.set_teach_mode(False)
@@ -104,24 +115,40 @@ def run(checkpoint: Path, dataset_root: Path, task: str, device: str, confirm: b
             observation["observation.images.wrist"] = normalize_camera_image(
                 observation["observation.images.wrist"]
             )
+            if "observation.images.overview" in metadata.features:
+                observation["observation.images.overview"] = normalize_camera_image(
+                    observation["observation.images.overview"]
+                )
+            if "observation.depth" in metadata.features:
+                observation["observation.depth"] = torch.as_tensor(
+                    observation["observation.images.wrist_depth"], dtype=torch.float32
+                )
             observation["task"] = task
             batch = preprocessor(observation)
             with torch.inference_mode():
                 action = policy.select_action(batch)
             action = to_numpy(postprocessor(action)).reshape(-1)
-            if action.size != 8:
-                raise ValueError(f"SmolVLA returned {action.size} values; expected 8.")
+            if action.size != POLICY_ACTION_SIZE:
+                raise ValueError(
+                    f"SmolVLA returned {action.size} values; expected {POLICY_ACTION_SIZE}."
+                )
 
             joints = action[:JOINT_COUNT]
             gripper_width = float(np.clip(action[JOINT_COUNT], GRIPPER_MIN_M, GRIPPER_MAX_M))
-            print(f"joints={np.round(joints, 3).tolist()} gripper_width_m={gripper_width:.4f}")
+            gripper_force = float(
+                np.clip(action[JOINT_COUNT + 1], GRIPPER_FORCE_MIN, GRIPPER_FORCE_MAX)
+            )
+            print(
+                f"joints={np.round(joints, 3).tolist()} "
+                f"gripper_width_m={gripper_width:.4f} gripper_force={gripper_force:.2f}"
+            )
             if not dry_run:
                 if fast_motion:
                     robot._arm.move_js(joints.tolist())
                 else:
                     robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
                     robot._arm.move_j(joints.tolist())
-                effector.move_gripper_m(value=gripper_width, force=30.0)
+                effector.move_gripper_m(value=gripper_width, force=gripper_force)
             if not dry_run:
                 key = 255
                 try:
@@ -142,7 +169,7 @@ def run(checkpoint: Path, dataset_root: Path, task: str, device: str, confirm: b
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run SmolVLA on NERO through an 8D joint/gripper adapter.")
+    parser = argparse.ArgumentParser(description="Run SmolVLA on NERO through a 9D joint/gripper adapter.")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Local SmolVLA checkpoint directory.")
     parser.add_argument("--dataset-root", type=Path, required=True, help="Local 8D NERO dataset used for normalization.")
     parser.add_argument("--task", required=True, help="Language instruction, for example: pick up the banana")

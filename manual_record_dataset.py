@@ -2,31 +2,33 @@ import argparse
 import cv2
 import numpy as np
 import re
-import select
 import shutil
-import sys
-import termios
-import tty
 import time
 from datetime import datetime
 from pathlib import Path
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot_robot_nero import Nero, NeroConfig
+from lerobot_robot_nero.console import read_key_nonblocking
 
 
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 REPO_ID = "adrian/nero_manual"
+DATASET_FPS = 30
+JOINT_NAMES = [f"joint{i}.pos" for i in range(1, 8)]
+STATE_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
+ACTION_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
+
 FEATURES = {
-    "observation.state": {"dtype": "float32", "shape": (7,), "names": None},
-    "action": {"dtype": "float32", "shape": (8,), "names": None},
+    "observation.state": {"dtype": "float32", "shape": (9,), "names": STATE_NAMES},
+    "action": {"dtype": "float32", "shape": (9,), "names": ACTION_NAMES},
     "observation.images.wrist": {
-        "dtype": "image",
+        "dtype": "video",
         "shape": (3, 480, 640),
         "names": ["channel", "height", "width"],
     },
     "observation.images.overview": {
-        "dtype": "image",
+        "dtype": "video",
         "shape": (3, 480, 640),
         "names": ["channel", "height", "width"],
     },
@@ -63,21 +65,6 @@ def move_gripper(robot: Nero, effector, width_m: float) -> None:
         robot.set_teach_mode(True)
 
 
-def read_terminal_key() -> int:
-    if not sys.stdin.isatty():
-        return -1
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        readable, _, _ = select.select([fd], [], [], 0)
-        if readable:
-            return ord(sys.stdin.read(1))
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    return -1
-
-
 def main(task: str, dataset_root: Path | None = None) -> None:
     root = dataset_root or DATASET_BASE / f"nero_manual__{dataset_slug(task)}"
     info_path = root / "meta" / "info.json"
@@ -94,8 +81,10 @@ def main(task: str, dataset_root: Path | None = None) -> None:
         info_path = root / "meta" / "info.json"
         tasks_path = root / "meta" / "tasks.parquet"
     if info_path.exists() and tasks_path.exists():
-        dataset = LeRobotDataset(
-            repo_id=REPO_ID, root=root, download_videos=False
+        dataset = LeRobotDataset.resume(
+            repo_id=REPO_ID,
+            root=root,
+            video_backend="pyav",
         )
         episode_index = dataset.meta.total_episodes
     else:
@@ -104,24 +93,23 @@ def main(task: str, dataset_root: Path | None = None) -> None:
             shutil.rmtree(root)
         dataset = LeRobotDataset.create(
             repo_id=REPO_ID,
-            fps=15,
+            fps=DATASET_FPS,
             features=FEATURES,
             robot_type="nero",
             root=root,
             use_videos=True,
+            video_backend="pyav",
         )
         episode_index = 0
 
     cfg = NeroConfig(
         id="manual_record",
-        can_channel="can0",
         bitrate=1_000_000,
         firmware_version="v121",
         speed_percent=50,
         has_gripper=True,
         has_camera=True,
         has_overview_camera=True,
-        overview_camera_index=0,
     )
 
     robot = Nero(cfg)
@@ -138,7 +126,6 @@ def main(task: str, dataset_root: Path | None = None) -> None:
         print(f"Gripper range configuration {'succeeded' if range_set else 'not acknowledged'}.")
     robot.set_teach_mode(True)
 
-    dataset.episode_buffer = dataset.create_episode_buffer(episode_index=episode_index)
     print(f"Task: {task}")
     print(f"Dataset: {root} | episode: {episode_index}")
     print("Teach mode enabled. Move the robot manually. Press '1' to close (0 mm), '0' to open (100 mm), 'r' to release, 'q' to stop and save the dataset.")
@@ -169,8 +156,6 @@ def main(task: str, dataset_root: Path | None = None) -> None:
                     image = image.astype(np.uint8)
                 if image.ndim == 3 and image.shape[0] in (1, 3):
                     image = np.transpose(image, (1, 2, 0))
-                if image.ndim == 3 and image.shape[2] == 3:
-                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
             if overview is None:
                 print("Warning: no overview image captured; webcam may not be connected.")
@@ -183,8 +168,6 @@ def main(task: str, dataset_root: Path | None = None) -> None:
                     overview = overview.astype(np.uint8)
                 if overview.ndim == 3 and overview.shape[0] in (1, 3):
                     overview = np.transpose(overview, (1, 2, 0))
-                if overview.ndim == 3 and overview.shape[2] == 3:
-                    overview = cv2.cvtColor(overview, cv2.COLOR_RGB2BGR)
 
             if depth is not None:
                 depth = np.asarray(depth, dtype=np.float32)
@@ -262,7 +245,12 @@ def main(task: str, dataset_root: Path | None = None) -> None:
                 cv2.line(side_view, (0, 240), (200, 240), (0, 255, 0), 2)
                 cv2.line(side_view, (100, 0), (100, 480), (0, 0, 255), 2)
 
-            combined = np.hstack([image, overview, depth_vis, side_view])
+            combined = np.hstack([
+                cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+                cv2.cvtColor(overview, cv2.COLOR_RGB2BGR),
+                depth_vis,
+                side_view,
+            ])
             cv2.rectangle(combined, (0, 0), (combined.shape[1], 58), (10, 14, 18), -1)
             cv2.putText(
                 combined,
@@ -285,9 +273,9 @@ def main(task: str, dataset_root: Path | None = None) -> None:
                 cv2.LINE_AA,
             )
             cv2.imshow("Nero manual record", combined)
-            key = cv2.waitKey(30)
+            key = cv2.waitKey(round(1000 / DATASET_FPS))
             if key == -1:
-                key = read_terminal_key()
+                key = read_key_nonblocking()
             else:
                 key &= 0xFF
 
@@ -323,7 +311,12 @@ def main(task: str, dataset_root: Path | None = None) -> None:
             frame = {
                 "observation.state": state,
                 "action": np.concatenate(
-                    [state, np.asarray([gripper_width_m], dtype=np.float32)]
+                    [
+                        state[:7],
+                        np.asarray(
+                            [gripper_width_m, GRIPPER_FORCE_N], dtype=np.float32
+                        ),
+                    ]
                 ),
                 "observation.images.wrist": image,
                 "observation.images.overview": overview,

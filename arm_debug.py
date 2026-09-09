@@ -4,13 +4,14 @@
 import time
 
 from pyAgxArm import create_agx_arm_config, AgxArmFactory, ArmModel, NeroFW
+from lerobot_robot_nero.config import default_can_channel, default_can_interface
 
 
 cfg = create_agx_arm_config(
     robot=ArmModel.NERO,
     firmeware_version=NeroFW.V121,
-    interface="socketcan",
-    channel="can0",
+    interface=default_can_interface(),
+    channel=default_can_channel(),
 )
 
 robot = AgxArmFactory.create_arm(cfg)

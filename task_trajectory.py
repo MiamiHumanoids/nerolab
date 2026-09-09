@@ -327,6 +327,50 @@ def prepare_replay_samples(recording: dict[str, Any]) -> list[dict[str, Any]]:
     return convert_leader_samples(samples, follower_anchor)
 
 
+def resample_replay_samples(
+    samples: list[dict[str, Any]], fps: int
+) -> list[dict[str, Any]]:
+    if fps <= 0:
+        raise ValueError("Replay sample rate must be positive.")
+    _validate_targets(samples)
+    start_time = float(samples[0]["time"])
+    end_time = float(samples[-1]["time"])
+    if end_time <= start_time:
+        raise ValueError("Replay samples must span a positive duration.")
+
+    frame_count = max(2, int(round((end_time - start_time) * fps)) + 1)
+    resampled: list[dict[str, Any]] = []
+    source_index = 0
+    for frame_index in range(frame_count):
+        frame_time = start_time + frame_index / fps
+        source_time = end_time if frame_index == frame_count - 1 else min(frame_time, end_time)
+        while (
+            source_index + 1 < len(samples) - 1
+            and float(samples[source_index + 1]["time"]) <= source_time
+        ):
+            source_index += 1
+        current = samples[source_index]
+        following = samples[source_index + 1]
+        current_time = float(current["time"])
+        following_time = float(following["time"])
+        fraction = min(
+            1.0,
+            max(0.0, (source_time - current_time) / (following_time - current_time)),
+        )
+        processed = dict(following if fraction >= 1.0 else current)
+        processed["time"] = frame_time
+        processed["joints"] = [
+            float(value) + (float(goal) - float(value)) * fraction
+            for value, goal in zip(current["joints"], following["joints"])
+        ]
+        if "gripper" in current and "gripper" in following:
+            value = float(current["gripper"])
+            goal = float(following["gripper"])
+            processed["gripper"] = value + (goal - value) * fraction
+        resampled.append(processed)
+    return resampled
+
+
 def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:
     start = [float(value) for value in robot.get_joint_angles()]
     largest_delta = max(abs(goal - value) for value, goal in zip(start, target))

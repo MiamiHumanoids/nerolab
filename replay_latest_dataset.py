@@ -61,8 +61,9 @@ def normalize_image(frame: np.ndarray | object) -> np.ndarray:
     return image
 
 
-def replay_dataset(dataset_root: str | None = None, repo_id: str | None = None, fps: int = 15, max_frames: int | None = None, start_frame: int | None = None, episode_index: int | None = None) -> None:
+def replay_dataset(dataset_root: str | None = None, repo_id: str | None = None, fps: int | None = None, max_frames: int | None = None, start_frame: int | None = None, episode_index: int | None = None) -> None:
     ds = load_dataset(dataset_root=dataset_root, repo_id=repo_id)
+    playback_fps = fps if fps is not None else int(ds.meta.fps)
     if episode_index is None:
         episode_start, episode_end = latest_episode_bounds(ds)
         episode_index = ds.meta.total_episodes - 1
@@ -160,7 +161,7 @@ def replay_dataset(dataset_root: str | None = None, repo_id: str | None = None, 
             cv2.putText(combined, "1: close 0 mm    0: open 100 mm    r: release gripper", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
             cv2.putText(combined, f"Task: {sample.get('task', '')}", (12, 49), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 220, 255), 1, cv2.LINE_AA)
             cv2.imshow("Nero dataset replay", combined)
-            key = cv2.waitKey(max(1, int(1000 / max(1, fps)))) & 0xFF
+            key = cv2.waitKey(max(1, int(1000 / max(1, playback_fps)))) & 0xFF
             if key == ord("q"):
                 break
     finally:
@@ -171,7 +172,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay the latest NERO LeRobot dataset and print joint angles.")
     parser.add_argument("--dataset-root", type=str, default=None, help="Path to a saved dataset root. Defaults to the newest dataset in ~/Nero/datasets.")
     parser.add_argument("--repo-id", type=str, default=None, help="Optional repo id override.")
-    parser.add_argument("--fps", type=int, default=15, help="Replay speed in frames per second.")
+    parser.add_argument("--fps", type=int, default=None, help="Replay speed override; defaults to the dataset frame rate.")
     parser.add_argument("--start-frame", type=int, default=None, help="Offset within the latest episode; defaults to its first frame.")
     parser.add_argument("--episode-index", type=int, default=None, help="Episode to replay; defaults to the latest episode.")
     parser.add_argument("--max-frames", type=int, default=None, help="Replay this many frames, default is the whole dataset.")

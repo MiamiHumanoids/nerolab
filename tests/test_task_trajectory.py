@@ -16,6 +16,7 @@ from task_trajectory import (
     is_safe_bicep_pose,
     prepare_gripper_for_replay,
     prepare_replay_samples,
+    resample_replay_samples,
     safe_bicep_shutdown,
     safe_bicep_recovery_pose,
     smooth_move_with_recovery,
@@ -24,6 +25,23 @@ from task_trajectory import (
 
 
 class TaskTrajectoryTest(unittest.TestCase):
+    def test_resample_replay_samples_produces_exact_30_fps_timeline(self):
+        samples = [
+            {"time": 0.0, "joints": [0.0] * 7, "gripper": 0.1},
+            {"time": 1.0, "joints": [1.0] * 7, "gripper": 0.0},
+        ]
+
+        resampled = resample_replay_samples(samples, 30)
+
+        self.assertEqual(len(resampled), 31)
+        self.assertEqual(resampled[0]["joints"], [0.0] * 7)
+        self.assertEqual(resampled[-1]["joints"], [1.0] * 7)
+        self.assertAlmostEqual(resampled[15]["joints"][0], 0.5)
+        self.assertTrue(all(
+            abs(float(sample["time"]) - index / 30) < 1e-9
+            for index, sample in enumerate(resampled)
+        ))
+
     def test_safe_bicep_recovery_pose_uses_sdk_forward_kinematics(self):
         expected_pose = [-0.2, 0.0, 0.35, -1.4, 0.0, -3.0]
 

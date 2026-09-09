@@ -21,7 +21,12 @@ def as_numpy(value):
 
 
 def delete_episode(root: Path, episode_index: int) -> None:
-    dataset = LeRobotDataset(repo_id="adrian/nero_manual", root=root, download_videos=False)
+    dataset = LeRobotDataset(
+        repo_id="adrian/nero_manual",
+        root=root,
+        download_videos=False,
+        video_backend="pyav",
+    )
     if episode_index < 0 or episode_index >= dataset.num_episodes:
         raise ValueError(f"Episode index {episode_index} is out of range.")
 
@@ -43,7 +48,11 @@ def delete_episode(root: Path, episode_index: int) -> None:
         features=features,
         robot_type=info.get("robot_type", "nero"),
         root=temporary_root,
-        use_videos=any(feature.get("dtype") == "image" for feature in features.values()),
+        use_videos=any(
+            feature.get("dtype") in {"image", "video"}
+            for feature in features.values()
+        ),
+        video_backend="pyav",
     )
 
     new_episode = 0
@@ -53,7 +62,6 @@ def delete_episode(root: Path, episode_index: int) -> None:
         episode = dataset.meta.episodes[old_episode]
         start = int(episode["dataset_from_index"])
         end = int(episode["dataset_to_index"])
-        rebuilt.episode_buffer = rebuilt.create_episode_buffer(episode_index=new_episode)
         for frame_index in range(start, end):
             sample = dataset[frame_index]
             frame = {
