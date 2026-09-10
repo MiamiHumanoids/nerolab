@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -31,8 +32,33 @@ GRIPPER_OPEN_CONFIRMATION_S = 0.45
 GRIPPER_RELEASE_TOLERANCE_RAD = 0.01
 GRIPPER_RELEASE_WRIST_TOLERANCE_RAD = 0.005
 GRIPPER_RELEASE_TIMEOUT_S = 5.0
+GRIPPER_GRASP_SETTLE_S = 0.2
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
+REPLAY_FATAL_ARM_STATES = (
+    "COLLISION_OCCURRED",
+    "EMERGENCY_STOP",
+    "JOINT_BRAKE_NOT_RELEASED",
+    "BRAKE_NOT_RELEASED",
+)
+
+
+def require_replay_motion_ready(robot: Any, label: str) -> None:
+    status = robot.get_arm_status()
+    message = getattr(status, "msg", status)
+    arm_status = str(getattr(message, "arm_status", ""))
+    ctrl_mode = str(getattr(message, "ctrl_mode", ""))
+    if any(state in arm_status for state in REPLAY_FATAL_ARM_STATES):
+        raise RuntimeError(f"{label}: replay aborted; arm_status={arm_status}")
+    if ctrl_mode and "CAN_CTRL" not in ctrl_mode:
+        raise RuntimeError(
+            f"{label}: replay aborted; controller left CAN control; ctrl_mode={ctrl_mode}"
+        )
+    get_enabled = getattr(robot._arm, "get_joints_enable_status_list", None)
+    if get_enabled is not None:
+        enabled = get_enabled()
+        if not all(enabled):
+            raise RuntimeError(f"{label}: replay aborted; arm joints are disabled: {enabled}")
 
 
 def format_cli_float(value: float) -> str:
@@ -105,6 +131,7 @@ def stream_recorded_trajectory(
         remaining = started + sample_time - time.monotonic()
         if remaining > 0.0:
             time.sleep(remaining)
+        require_replay_motion_ready(robot, "Task replay")
         robot._arm.move_js(target)
         if sample_index is not None and sample_callback is not None:
             timeline_pause = sample_callback(samples[sample_index], sample_index)
@@ -185,6 +212,27 @@ def is_amplified_gripper_opening(
     return previous_grasping and not bool(sample.get("gripper_grasping", False))
 
 
+def is_amplified_gripper_closing(
+    sample: dict[str, Any], previous_grasping: bool
+) -> bool:
+    return not previous_grasping and bool(sample.get("gripper_grasping", False))
+
+
+def hold_gripper_grasp_pose(
+    robot: Any, target: list[float], label: str
+) -> float:
+    started = time.monotonic()
+    deadline = started + GRIPPER_GRASP_SETTLE_S
+    require_replay_motion_ready(robot, label)
+    robot._arm.move_js(target)
+    while time.monotonic() < deadline:
+        require_replay_motion_ready(robot, label)
+        time.sleep(STREAM_INTERVAL_S)
+    elapsed = time.monotonic() - started
+    print(f"{label}: held pickup pose for gripper closure ({elapsed:.3f}s).")
+    return elapsed
+
+
 def wait_for_gripper_release_pose(robot: Any, target: list[float], label: str) -> float:
     reachable_target = [
         min(max(goal, lower), upper)
@@ -193,6 +241,7 @@ def wait_for_gripper_release_pose(robot: Any, target: list[float], label: str) -
     started = time.monotonic()
     deadline = started + GRIPPER_RELEASE_TIMEOUT_S
     while time.monotonic() < deadline:
+        require_replay_motion_ready(robot, label)
         current = [float(value) for value in robot.get_joint_angles()]
         errors = [abs(value - goal) for value, goal in zip(current, reachable_target)]
         if (
@@ -325,6 +374,22 @@ def prepare_replay_samples(recording: dict[str, Any]) -> list[dict[str, Any]]:
         raise ValueError("Taught task follower anchor must contain seven joints.")
     print("Leader-space task detected; converting it with its follower anchor.")
     return convert_leader_samples(samples, follower_anchor)
+
+
+def prepare_task_execution_samples(
+    recording: dict[str, Any]
+) -> list[dict[str, Any]]:
+    samples = prepare_replay_samples(recording)
+    if (
+        recording.get("safe_bicep_return") is True
+        and len(samples) > 2
+        and all(
+            abs(float(value) - target) <= 1e-9
+            for value, target in zip(samples[-1]["joints"], SAFE_BICEP_JOINTS)
+        )
+    ):
+        return samples[:-1]
+    return samples
 
 
 def resample_replay_samples(
@@ -467,14 +532,44 @@ def smooth_move_with_recovery(robot: Any, target: list[float], label: str) -> No
 
 
 def safe_bicep_shutdown(robot: Any, label: str) -> None:
+    active_error = sys.exc_info()[1]
+    cleanup_error: Exception | None = None
+    motion_ready = True
     try:
-        robot._arm.set_speed_percent(25)
-        smooth_move_with_recovery(robot, SAFE_BICEP_JOINTS, label)
-        print(f"{label}: Safe Bicep reached.", flush=True)
-    finally:
+        try:
+            recover_teach = getattr(robot, "recover_stuck_teach_state", None)
+            if recover_teach is not None and recover_teach():
+                print(f"{label}: recovered controller from Teach mode.", flush=True)
+            require_replay_motion_ready(robot, label)
+        except AttributeError:
+            pass
+        except Exception as error:
+            motion_ready = False
+            print(f"{label}: skipping Safe Bicep motion: {error}", flush=True)
+        if motion_ready:
+            robot._arm.set_speed_percent(25)
+            smooth_move_with_recovery(robot, SAFE_BICEP_JOINTS, label)
+            print(f"{label}: Safe Bicep reached.", flush=True)
+    except Exception as error:
+        cleanup_error = error
+    try:
         robot.engage_brakes()
         print(f"{label}: emergency-stop resting pose settled.", flush=True)
-        robot.disconnect(disable_arm=False)
+    except Exception as error:
+        cleanup_error = cleanup_error or error
+    finally:
+        try:
+            robot.disconnect(disable_arm=False)
+        except Exception as error:
+            cleanup_error = cleanup_error or error
+    if cleanup_error is not None:
+        if active_error is not None:
+            print(
+                f"{label}: cleanup error after {active_error!r}: {cleanup_error!r}",
+                flush=True,
+            )
+        else:
+            raise cleanup_error
 
 
 def _validate_targets(samples: list[dict[str, Any]]) -> None:

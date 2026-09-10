@@ -6,20 +6,21 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
-import cv2
-import numpy as np
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-from lerobot_robot_nero import Nero, NeroConfig
+from dataset_episode_labels import save_episode_label
 from task_trajectory import (
+    GRIPPER_REPLAY_FORCE,
     amplify_gripper_samples,
     command_recorded_gripper,
+    hold_gripper_grasp_pose,
+    is_amplified_gripper_closing,
     is_amplified_gripper_opening,
     prepare_gripper_for_replay,
-    prepare_replay_samples,
+    prepare_task_execution_samples,
     resample_replay_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
@@ -30,20 +31,20 @@ REPLAY_SPEED_PERCENT = 25
 DATASET_FPS = 30
 
 REPO_ID = "adrian/nero_replayed"
-JOINT_NAMES = [f"joint{i}.pos" for i in range(1, 8)]
-STATE_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
-ACTION_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
+JOINT_NAMES = [f"Joint_{i}" for i in range(1, 8)]
+STATE_NAMES = [*JOINT_NAMES, "Gripper"]
+ACTION_NAMES = [*JOINT_NAMES, "Gripper"]
 
 FEATURES = {
-    "observation.state": {"dtype": "float32", "shape": (9,), "names": STATE_NAMES},
-    "action": {"dtype": "float32", "shape": (9,), "names": ACTION_NAMES},
+    "observation.state": {"dtype": "float32", "shape": (8,), "names": STATE_NAMES},
+    "action": {"dtype": "float32", "shape": (8,), "names": ACTION_NAMES},
     "observation.images.wrist": {"dtype": "video", "shape": (3, 480, 640), "names": ["channel", "height", "width"]},
     "observation.images.overview": {"dtype": "video", "shape": (3, 480, 640), "names": ["channel", "height", "width"]},
     "observation.depth": {"dtype": "float32", "shape": (480, 640), "names": None},
 }
 
 
-def rgb_image(value: object, label: str) -> np.ndarray:
+def rgb_image(value: object, label: str) -> Any:
     if value is None:
         image = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(image, f"No {label} camera", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1, cv2.LINE_AA)
@@ -56,13 +57,73 @@ def rgb_image(value: object, label: str) -> np.ndarray:
     return image
 
 
-def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -> None:
+def main(
+    task_file: Path,
+    dataset_root: Path,
+    amplified_gripper: bool = False,
+    variation: str | None = None,
+) -> None:
+    print("Preparing NERO replay recorder...", flush=True)
+    global cv2, np
+    import cv2
+    import numpy as np
+
+    cv2.namedWindow("NERO replay recording", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("NERO replay recording", 640, 140)
+    print("Loading LeRobot runtime...", flush=True)
+    runtime: dict[str, Any] = {}
+    runtime_error: list[BaseException] = []
+
+    def load_runtime() -> None:
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+            from lerobot_robot_nero import Nero, NeroConfig
+
+            runtime.update(
+                LeRobotDataset=LeRobotDataset,
+                Nero=Nero,
+                NeroConfig=NeroConfig,
+            )
+        except BaseException as exc:
+            runtime_error.append(exc)
+
+    loader = threading.Thread(target=load_runtime, daemon=True)
+    loader.start()
+    animation_frame = 0
+    while loader.is_alive():
+        startup = np.zeros((140, 640, 3), dtype=np.uint8)
+        dots = "." * (animation_frame % 4)
+        cv2.putText(
+            startup,
+            f"Preparing cameras and dataset{dots}",
+            (30, 82),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.imshow("NERO replay recording", startup)
+        cv2.waitKey(50)
+        animation_frame += 1
+    loader.join()
+    if runtime_error:
+        raise runtime_error[0]
+    LeRobotDataset = runtime["LeRobotDataset"]
+    Nero = runtime["Nero"]
+    NeroConfig = runtime["NeroConfig"]
+
     recording = json.loads(task_file.read_text())
-    samples = prepare_replay_samples(recording)
+    samples = prepare_task_execution_samples(recording)
     if amplified_gripper:
         samples = amplify_gripper_samples(samples)
     samples = resample_replay_samples(samples, DATASET_FPS)
     task = str(recording.get("task", task_file.stem))
+    episode_variation = (
+        str(recording.get("variation", ""))
+        if variation is None
+        else variation
+    ).strip()
 
     if dataset_root.exists():
         if (dataset_root / "meta" / "info.json").exists():
@@ -108,7 +169,6 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
             raise RuntimeError(f"Replay aborted: arm joints are disabled: {enabled_joints}")
     robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
     robot._arm.set_speed_percent(REPLAY_SPEED_PERCENT)
-    cv2.namedWindow("NERO replay recording", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO replay recording", 1280, 480)
     print(f"Replaying taught task and recording dataset: {dataset_root}")
     print("Streaming recorded joint targets on their original timeline.")
@@ -132,16 +192,21 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
                     f"got {mode!r} at frame {index}"
                 )
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
-            gripper_force = float(sample.get("gripper_force", GRIPPER_REPLAY_FORCE))
             robot._arm.move_js(target)
             if amplified_gripper and is_amplified_gripper_opening(sample, previous_grasping):
                 pause_started = time.monotonic()
                 wait_for_gripper_release_pose(robot, target, "Replay recording")
                 replay_started += time.monotonic() - pause_started
             previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
+            if amplified_gripper and is_amplified_gripper_closing(
+                sample, previous_grasping
+            ):
+                pause_started = time.monotonic()
+                hold_gripper_grasp_pose(robot, target, "Replay recording")
+                replay_started += time.monotonic() - pause_started
             previous_grasping = bool(sample.get("gripper_grasping", False))
             obs = robot.get_observation()
-            state = np.asarray(obs["observation.state"], dtype=np.float32)
+            state = np.asarray(obs["observation.state"][:8], dtype=np.float32)
             wrist = rgb_image(obs.get("observation.images.wrist"), "wrist")
             overview = rgb_image(obs.get("observation.images.overview"), "overview")
             depth = np.asarray(obs.get("observation.images.wrist_depth", np.zeros((480, 640), dtype=np.float32)), dtype=np.float32)
@@ -151,7 +216,7 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
                 "observation.state": state,
                 "action": np.concatenate([
                     np.asarray(target, dtype=np.float32),
-                    np.asarray([gripper, gripper_force], dtype=np.float32),
+                    np.asarray([gripper], dtype=np.float32),
                 ]),
                 "observation.images.wrist": wrist,
                 "observation.images.overview": overview,
@@ -171,23 +236,36 @@ def main(task_file: Path, dataset_root: Path, amplified_gripper: bool = False) -
             deadline = replay_started + next_time
             while time.monotonic() < deadline:
                 time.sleep(0.005)
-        print("Replay complete; saving episode.")
+        print("Task complete; ending dataset recording before Safe Bicep reset.")
     finally:
         cv2.destroyAllWindows()
         safe_bicep_shutdown(robot, "Replay recording shutdown")
 
+    episode_index = dataset.meta.total_episodes
     dataset.save_episode()
+    save_episode_label(
+        dataset_root,
+        episode_index,
+        task,
+        episode_variation,
+    )
     print(f"Saved replay dataset: {dataset_root}")
+    print(
+        f"Episode {episode_index}: {task}"
+        + (f" - {episode_variation}" if episode_variation else "")
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Replay a taught NERO task and record cameras and joint data.")
     parser.add_argument("--task-file", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--variation", default=None)
     parser.add_argument("--amplified-gripper", action="store_true")
     args = parser.parse_args()
     main(
         args.task_file,
         args.dataset_root,
         amplified_gripper=args.amplified_gripper,
+        variation=args.variation,
     )

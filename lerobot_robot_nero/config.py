@@ -38,3 +38,4 @@ class NeroConfig(RobotConfig):
     has_overview_camera: bool = False
     overview_camera_index: int = field(default_factory=default_overview_camera_index)
     reset_on_connect: bool = True
+    enable_on_connect: bool = True

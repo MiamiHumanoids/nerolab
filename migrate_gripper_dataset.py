@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Migrate legacy NERO datasets to width-and-force state/action vectors."""
+"""Migrate legacy NERO datasets to joint-and-gripper-width vectors."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from lerobot.datasets import LeRobotDataset, recompute_stats
 
-JOINT_NAMES = [f"joint{i}.pos" for i in range(1, 8)]
-FEATURE_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
+JOINT_NAMES = [f"Joint_{i}" for i in range(1, 8)]
+FEATURE_NAMES = [*JOINT_NAMES, "Gripper"]
 BACKUP_SUFFIX = ".gripper-v1.bak"
 
 
@@ -33,8 +33,8 @@ def migrated_schema_metadata(
     updated = dict(metadata)
     payload = json.loads(updated[b"huggingface"])
     features = payload["info"]["features"]
-    features["observation.state"]["length"] = 9
-    features["action"]["length"] = 9
+    features["observation.state"]["length"] = 8
+    features["action"]["length"] = 8
     updated[b"huggingface"] = json.dumps(payload).encode()
     return updated
 
@@ -50,7 +50,7 @@ def migrate_data_file(path: Path, default_force: float) -> None:
     parquet = pq.ParquetFile(path)
     state_type = parquet.schema_arrow.field("observation.state").type
     action_type = parquet.schema_arrow.field("action").type
-    if state_type.list_size == 9 and action_type.list_size == 9:
+    if state_type.list_size == 8 and action_type.list_size == 8:
         return
     if state_type.list_size != 7 or action_type.list_size != 8:
         raise ValueError(
@@ -68,9 +68,8 @@ def migrate_data_file(path: Path, default_force: float) -> None:
             action_index = batch.schema.get_field_index("action")
             states = np.asarray(batch.column(state_index).to_pylist(), dtype=np.float32)
             actions = np.asarray(batch.column(action_index).to_pylist(), dtype=np.float32)
-            forces = np.full((len(actions), 1), default_force, dtype=np.float32)
-            migrated_states = np.concatenate((states, actions[:, 7:8], forces), axis=1)
-            migrated_actions = np.concatenate((actions, forces), axis=1)
+            migrated_states = np.concatenate((states, actions[:, 7:8]), axis=1)
+            migrated_actions = actions
             batch = batch.set_column(
                 state_index, "observation.state", fixed_float_list(migrated_states)
             )
@@ -103,7 +102,7 @@ def update_info(root: Path) -> None:
     backup(path)
     info = json.loads(path.read_text())
     for key in ("observation.state", "action"):
-        info["features"][key]["shape"] = [9]
+        info["features"][key]["shape"] = [8]
         info["features"][key]["names"] = FEATURE_NAMES
     path.write_text(json.dumps(info, indent=4) + "\n")
 
@@ -131,8 +130,9 @@ def migrate(root: Path, repo_id: str, default_force: float) -> None:
     info = json.loads((root / "meta" / "info.json").read_text())
     state_size = info["features"]["observation.state"]["shape"][0]
     action_size = info["features"]["action"]["shape"][0]
-    if (state_size, action_size) == (9, 9):
-        print("Dataset already uses the 9D gripper contract")
+    if (state_size, action_size) == (8, 8):
+        update_info(root)
+        print(f"Updated 8D state/action labels: {root}")
         return
     if (state_size, action_size) != (7, 8):
         raise ValueError(f"Unsupported dataset dimensions: {state_size}/{action_size}")
@@ -144,7 +144,7 @@ def migrate(root: Path, repo_id: str, default_force: float) -> None:
     dataset = LeRobotDataset(repo_id=repo_id, root=root, video_backend="pyav")
     recompute_stats(dataset, skip_image_video=True)
     update_episode_stats(root)
-    print(f"Migrated dataset to 9D state/action vectors: {root}")
+    print(f"Migrated dataset to 8D state/action vectors: {root}")
     print(f"Legacy files were preserved with the {BACKUP_SUFFIX} suffix")
 
 

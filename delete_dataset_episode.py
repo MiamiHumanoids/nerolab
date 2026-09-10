@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from dataset_episode_labels import load_episode_labels, save_episode_label
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 META_FEATURES = {"timestamp", "frame_index", "episode_index", "index", "task_index"}
@@ -21,6 +22,7 @@ def as_numpy(value):
 
 
 def delete_episode(root: Path, episode_index: int) -> None:
+    episode_labels = load_episode_labels(root)
     dataset = LeRobotDataset(
         repo_id="adrian/nero_manual",
         root=root,
@@ -72,6 +74,14 @@ def delete_episode(root: Path, episode_index: int) -> None:
             frame["task"] = sample["task"]
             rebuilt.add_frame(frame)
         rebuilt.save_episode()
+        label = episode_labels.get(old_episode)
+        if label is not None:
+            save_episode_label(
+                temporary_root,
+                new_episode,
+                label["task"],
+                label["variation"],
+            )
         new_episode += 1
 
     if hasattr(rebuilt.meta, "_flush_metadata_buffer"):

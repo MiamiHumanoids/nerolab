@@ -1,5 +1,7 @@
 import importlib
-from unittest.mock import patch
+import queue
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 
 def test_package_is_importable():
@@ -41,3 +43,22 @@ def test_config_uses_windows_can_backend_defaults():
 
     assert cfg.can_interface == "gs_usb"
     assert cfg.can_channel == "0"
+
+
+def test_windows_can_start_timeout_restores_start_button():
+    from nero_lab import NeroLab
+
+    app = SimpleNamespace(
+        windows_can_start_generation=1,
+        windows_can_start_pending=True,
+        start_can_button=MagicMock(),
+        set_can_status=MagicMock(),
+        log_message=MagicMock(),
+    )
+
+    NeroLab._poll_windows_can_start(app, 1, queue.Queue(), deadline=0.0)
+
+    assert app.windows_can_start_pending is False
+    app.start_can_button.configure.assert_called_once_with(state="normal")
+    app.set_can_status.assert_called_once()
+    app.log_message.assert_called_once_with("CAN start timed out after 8 seconds")

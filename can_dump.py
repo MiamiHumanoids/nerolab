@@ -19,8 +19,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    describe_windows_can_error = None
     if os.name == "nt" and args.interface == "gs_usb":
-        from lerobot_robot_nero.windows_gs_usb import register_windows_gs_usb
+        from lerobot_robot_nero.windows_gs_usb import (
+            describe_windows_can_error,
+            register_windows_gs_usb,
+        )
 
         register_windows_gs_usb()
     running = True
@@ -35,25 +39,33 @@ def main() -> None:
         f"bitrate={args.bitrate}. Press Ctrl+C to stop."
     )
     count = 0
-    with can.Bus(
-        interface=args.interface,
-        channel=args.channel,
-        bitrate=args.bitrate,
-        receive_own_messages=False,
-        local_loopback=False,
-    ) as bus:
-        while running:
-            message = bus.recv(timeout=0.25)
-            if message is None:
-                continue
-            count += 1
-            frame_id = f"{message.arbitration_id:08X}" if message.is_extended_id else f"{message.arbitration_id:03X}"
-            data = " ".join(f"{value:02X}" for value in message.data)
-            print(
-                f"{count:8d}  {message.timestamp:14.6f}  "
-                f"{frame_id}  {message.dlc:3d}  {data}",
-                flush=True,
-            )
+    try:
+        with can.Bus(
+            interface=args.interface,
+            channel=args.channel,
+            bitrate=args.bitrate,
+            receive_own_messages=False,
+            local_loopback=False,
+        ) as bus:
+            while running:
+                message = bus.recv(timeout=0.25)
+                if message is None:
+                    continue
+                count += 1
+                frame_id = f"{message.arbitration_id:08X}" if message.is_extended_id else f"{message.arbitration_id:03X}"
+                data = " ".join(f"{value:02X}" for value in message.data)
+                print(
+                    f"{count:8d}  {message.timestamp:14.6f}  "
+                    f"{frame_id}  {message.dlc:3d}  {data}",
+                    flush=True,
+                )
+    except Exception as exc:
+        detail = (
+            describe_windows_can_error(str(exc))
+            if describe_windows_can_error is not None
+            else str(exc)
+        )
+        raise SystemExit(f"Could not open CAN adapter: {detail}") from None
 
 
 if __name__ == "__main__":

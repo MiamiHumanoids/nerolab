@@ -15,13 +15,13 @@ from lerobot_robot_nero.console import read_key_nonblocking
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 REPO_ID = "adrian/nero_manual"
 DATASET_FPS = 30
-JOINT_NAMES = [f"joint{i}.pos" for i in range(1, 8)]
-STATE_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
-ACTION_NAMES = [*JOINT_NAMES, "gripper.width_m", "gripper.force"]
+JOINT_NAMES = [f"Joint_{i}" for i in range(1, 8)]
+STATE_NAMES = [*JOINT_NAMES, "Gripper"]
+ACTION_NAMES = [*JOINT_NAMES, "Gripper"]
 
 FEATURES = {
-    "observation.state": {"dtype": "float32", "shape": (9,), "names": STATE_NAMES},
-    "action": {"dtype": "float32", "shape": (9,), "names": ACTION_NAMES},
+    "observation.state": {"dtype": "float32", "shape": (8,), "names": STATE_NAMES},
+    "action": {"dtype": "float32", "shape": (8,), "names": ACTION_NAMES},
     "observation.images.wrist": {
         "dtype": "video",
         "shape": (3, 480, 640),
@@ -137,7 +137,7 @@ def main(task: str, dataset_root: Path | None = None) -> None:
     try:
         while True:
             obs = robot.get_observation()
-            state = np.asarray(obs["observation.state"], dtype=np.float32)
+            state = np.asarray(obs["observation.state"][:8], dtype=np.float32)
             if np.allclose(state, 0.0):
                 print("Warning: joint state is still all zeros; check the arm is not in a neutral/no-feedback state.")
 
@@ -313,9 +313,7 @@ def main(task: str, dataset_root: Path | None = None) -> None:
                 "action": np.concatenate(
                     [
                         state[:7],
-                        np.asarray(
-                            [gripper_width_m, GRIPPER_FORCE_N], dtype=np.float32
-                        ),
+                        np.asarray([gripper_width_m], dtype=np.float32),
                     ]
                 ),
                 "observation.images.wrist": image,

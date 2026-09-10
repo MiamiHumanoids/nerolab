@@ -11,11 +11,15 @@ from task_trajectory import (
     append_safe_bicep_return,
     command_recorded_gripper,
     format_cli_float,
+    hold_gripper_grasp_pose,
     interpolated_joint_trajectory,
+    is_amplified_gripper_closing,
     is_amplified_gripper_opening,
     is_safe_bicep_pose,
     prepare_gripper_for_replay,
     prepare_replay_samples,
+    prepare_task_execution_samples,
+    require_replay_motion_ready,
     resample_replay_samples,
     safe_bicep_shutdown,
     safe_bicep_recovery_pose,
@@ -25,6 +29,88 @@ from task_trajectory import (
 
 
 class TaskTrajectoryTest(unittest.TestCase):
+    def test_task_execution_excludes_appended_safe_bicep_shutdown(self):
+        task_end = SAFE_BICEP_JOINTS.copy()
+        task_end[0] = 0.5
+        samples = [
+            {"time": 0.0, "joints": SAFE_BICEP_JOINTS.copy(), "gripper": 0.1},
+            {"time": 1.0, "joints": task_end, "gripper": 0.04},
+            {"time": 2.25, "joints": SAFE_BICEP_JOINTS.copy(), "gripper": 0.1},
+        ]
+
+        execution = prepare_task_execution_samples({
+            "joint_space": "follower",
+            "safe_bicep_return": True,
+            "samples": samples,
+        })
+
+        self.assertEqual(execution, samples[:-1])
+
+    def test_amplified_close_holds_pickup_pose_for_gripper(self):
+        target = [0.1] * 7
+
+        class Arm:
+            def __init__(self):
+                self.targets = []
+
+            def move_js(self, joints):
+                self.targets.append(joints)
+
+            def get_joints_enable_status_list(self):
+                return [True] * 7
+
+        robot = type(
+            "Robot",
+            (),
+            {
+                "_arm": Arm(),
+                "get_arm_status": lambda self: type(
+                    "Status",
+                    (),
+                    {"arm_status": "NORMAL", "ctrl_mode": "CAN_CTRL"},
+                )(),
+            },
+        )()
+        sample = {"gripper_grasping": True}
+
+        self.assertTrue(is_amplified_gripper_closing(sample, False))
+        self.assertFalse(is_amplified_gripper_closing(sample, True))
+        with (
+            patch(
+                "task_trajectory.time.monotonic",
+                side_effect=[0.0, 0.0, 0.05, 0.1, 0.15, 0.2, 0.2],
+            ),
+            patch("task_trajectory.time.sleep"),
+        ):
+            elapsed = hold_gripper_grasp_pose(robot, target, "Test")
+
+        self.assertAlmostEqual(elapsed, 0.2)
+        self.assertEqual(robot._arm.targets, [target])
+
+    def test_replay_motion_guard_rejects_collision(self):
+        class Arm:
+            def get_joints_enable_status_list(self):
+                return [True] * 7
+
+        robot = type(
+            "Robot",
+            (),
+            {
+                "_arm": Arm(),
+                "get_arm_status": lambda self: type(
+                    "Status",
+                    (),
+                    {
+                        "arm_status": "COLLISION_OCCURRED(0x7)",
+                        "ctrl_mode": "CAN_CTRL(0x1)",
+                    },
+                )(),
+            },
+        )()
+
+        with self.assertRaisesRegex(RuntimeError, "COLLISION_OCCURRED"):
+            require_replay_motion_ready(robot, "Test")
+
     def test_resample_replay_samples_produces_exact_30_fps_timeline(self):
         samples = [
             {"time": 0.0, "joints": [0.0] * 7, "gripper": 0.1},
@@ -367,6 +453,9 @@ class TaskTrajectoryTest(unittest.TestCase):
             def move_js(self, value):
                 self.targets.append(value)
 
+            def get_joints_enable_status_list(self):
+                return [True] * 7
+
         class Robot:
             def __init__(self):
                 self._arm = Arm()
@@ -377,6 +466,13 @@ class TaskTrajectoryTest(unittest.TestCase):
 
             def get_joint_angles(self):
                 return self.positions.pop(0)
+
+            def get_arm_status(self):
+                return type(
+                    "Status",
+                    (),
+                    {"arm_status": "NORMAL", "ctrl_mode": "CAN_CTRL"},
+                )()
 
         robot = Robot()
         with patch("task_trajectory.time.sleep"):
@@ -418,6 +514,113 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("speed", 25),
             ("prepare", "Replay shutdown"),
             ("move", SAFE_BICEP_JOINTS, "Replay shutdown"),
+            ("brakes",),
+            ("disconnect", False),
+        ])
+
+    def test_safe_shutdown_disconnects_when_brake_confirmation_fails(self):
+        events = []
+
+        class Arm:
+            def set_speed_percent(self, speed):
+                events.append(("speed", speed))
+
+        class Robot:
+            _arm = Arm()
+
+            def engage_brakes(self):
+                events.append(("brakes",))
+                raise RuntimeError("brakes not confirmed")
+
+            def disconnect(self, disable_arm=True):
+                events.append(("disconnect", disable_arm))
+
+        with (
+            patch("task_trajectory.smooth_move_with_recovery"),
+            self.assertRaisesRegex(RuntimeError, "brakes not confirmed"),
+        ):
+            safe_bicep_shutdown(Robot(), "Teach shutdown")
+
+        self.assertEqual(
+            events,
+            [("speed", 25), ("brakes",), ("disconnect", False)],
+        )
+
+    def test_safe_shutdown_skips_motion_after_collision(self):
+        events = []
+
+        class Arm:
+            def get_joints_enable_status_list(self):
+                return [True] * 7
+
+            def set_speed_percent(self, speed):
+                events.append(("speed", speed))
+
+        class Robot:
+            _arm = Arm()
+
+            def get_arm_status(self):
+                return type(
+                    "Status",
+                    (),
+                    {
+                        "arm_status": "COLLISION_OCCURRED(0x7)",
+                        "ctrl_mode": "CAN_CTRL(0x1)",
+                    },
+                )()
+
+            def engage_brakes(self):
+                events.append(("brakes",))
+
+            def disconnect(self, disable_arm=True):
+                events.append(("disconnect", disable_arm))
+
+        with patch("task_trajectory.smooth_move_with_recovery") as move:
+            safe_bicep_shutdown(Robot(), "Replay shutdown")
+
+        move.assert_not_called()
+        self.assertEqual(events, [("brakes",), ("disconnect", False)])
+
+    def test_safe_shutdown_recovers_teach_mode_before_motion(self):
+        events = []
+
+        class Arm:
+            def get_joints_enable_status_list(self):
+                return [True] * 7
+
+            def set_speed_percent(self, speed):
+                events.append(("speed", speed))
+
+        class Robot:
+            _arm = Arm()
+
+            def recover_stuck_teach_state(self):
+                events.append(("recover_teach",))
+                return True
+
+            def get_arm_status(self):
+                return type(
+                    "Status",
+                    (),
+                    {"arm_status": "NORMAL(0x0)", "ctrl_mode": "CAN_CTRL(0x1)"},
+                )()
+
+            def engage_brakes(self):
+                events.append(("brakes",))
+
+            def disconnect(self, disable_arm=True):
+                events.append(("disconnect", disable_arm))
+
+        with patch(
+            "task_trajectory.smooth_move_with_recovery",
+            side_effect=lambda robot, target, label: events.append(("move",)),
+        ):
+            safe_bicep_shutdown(Robot(), "Teach shutdown")
+
+        self.assertEqual(events, [
+            ("recover_teach",),
+            ("speed", 25),
+            ("move",),
             ("brakes",),
             ("disconnect", False),
         ])

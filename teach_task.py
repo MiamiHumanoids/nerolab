@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import time
 from pathlib import Path
 
@@ -16,7 +18,20 @@ from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
 from task_trajectory import append_safe_bicep_return, convert_leader_samples, safe_bicep_shutdown
 
 FPS = 50
+GRIPPER_CONFIG_TIMEOUT_S = 0.25
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
+
+
+def play_recording_start_beep() -> None:
+    try:
+        if os.name == "nt":
+            import winsound
+
+            winsound.Beep(1000, 250)
+        else:
+            print("\a", end="", flush=True)
+    except (ImportError, OSError, RuntimeError):
+        print("\a", end="", flush=True)
 
 
 def decode_gripper_status(status, control_state: bool = False):
@@ -63,19 +78,6 @@ def read_gripper_state(effector, fallback: tuple[str, float] = ("width", 0.1)):
     if physical is not None:
         return physical[0], physical[1]
     return fallback, 0.0
-def enable_can_feedback_push(arm) -> None:
-    mode = arm._msg_mode
-    previous_push = mode.enable_can_push
-    previous_move_mode = mode.move_mode
-    try:
-        mode.enable_can_push = mode.Enums.CanActiveMsgReporting.ENABLE
-        mode.move_mode = 255
-        arm._set_mode()
-    finally:
-        mode.enable_can_push = previous_push
-        mode.move_mode = previous_move_mode
-
-
 def wait_for_fresh_gripper_feedback(
     effector, previous_timestamp: float, timeout: float = 2.0
 ) -> tuple[str, float]:
@@ -97,7 +99,149 @@ def wait_for_fresh_gripper_feedback(
     )
 
 
-def main(task: str, output: Path, follower_anchor: list[float]) -> None:
+def leader_feedback_timestamp(arm) -> float:
+    getter = getattr(arm, "get_leader_joint_angles", None)
+    if getter is None:
+        return 0.0
+    feedback = getter()
+    return float(getattr(feedback, "timestamp", 0.0)) if feedback is not None else 0.0
+
+
+def follower_hold_target(
+    leader_joints: list[float],
+    leader_start: list[float],
+    follower_anchor: list[float],
+) -> list[float]:
+    if not (len(leader_joints) == len(leader_start) == len(follower_anchor) == 7):
+        raise ValueError("Teach shutdown hold pose requires seven joint values")
+    return [
+        float(value) + float(anchor) - float(start)
+        for value, start, anchor in zip(
+            leader_joints, leader_start, follower_anchor
+        )
+    ]
+
+
+def wait_for_gravity_compensation(
+    arm, previous_leader_timestamp: float = 0.0, timeout: float = 3.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_mode = "unknown"
+    last_teach_status = "unknown"
+    last_leader_timestamp = previous_leader_timestamp
+    last_enabled = None
+    while time.monotonic() < deadline:
+        status = arm.get_arm_status()
+        message = getattr(status, "msg", status)
+        last_mode = str(getattr(message, "ctrl_mode", "unknown"))
+        last_teach_status = str(getattr(message, "teach_status", "unknown"))
+        enabled_getter = getattr(arm, "get_joints_enable_status_list", None)
+        last_enabled = enabled_getter() if enabled_getter is not None else None
+        last_leader_timestamp = leader_feedback_timestamp(arm)
+        leader_ready = last_leader_timestamp > previous_leader_timestamp
+        motors_ready = last_enabled is None or all(last_enabled)
+        if leader_ready and motors_ready:
+            print(
+                f"Gravity compensation active: ctrl_mode={last_mode} "
+                f"teach_status={last_teach_status} "
+                f"leader_timestamp={last_leader_timestamp:.6f} "
+                f"enabled={last_enabled}",
+                flush=True,
+            )
+            return
+        time.sleep(0.05)
+    raise RuntimeError(
+        "Teach mode did not enter gravity compensation; refusing to record. "
+        f"ctrl_mode={last_mode} teach_status={last_teach_status} "
+        f"leader_timestamp={last_leader_timestamp:.6f} "
+        f"enabled={last_enabled}. Fresh leader-joint feedback is required."
+    )
+
+
+def enter_gravity_compensation(robot, attempts: int = 3) -> list[float]:
+    last_error: RuntimeError | None = None
+    normalized_anchor: list[float] | None = None
+    for attempt in range(1, attempts + 1):
+        print(
+            f"Preparing controller for Teach mode ({attempt}/{attempts})...",
+            flush=True,
+        )
+        status = robot.get_arm_status()
+        message = getattr(status, "msg", status)
+        ctrl_mode = str(getattr(message, "ctrl_mode", ""))
+        teach_status = str(getattr(message, "teach_status", ""))
+        enabled_getter = getattr(robot._arm, "get_joints_enable_status_list", None)
+        enabled = enabled_getter() if enabled_getter is not None else None
+        controller_ready = (
+            attempt == 1
+            and "CAN_CTRL" in ctrl_mode
+            and "DISABLED" in teach_status
+            and (enabled is None or all(enabled))
+        )
+        if controller_ready:
+            print("Controller already ready; skipping follower/reset normalization.", flush=True)
+        else:
+            robot.set_teach_mode(False)
+        normalized_anchor = [float(value) for value in robot.get_joint_angles()]
+        leader_timestamp = leader_feedback_timestamp(robot._arm)
+        robot.set_teach_mode(True)
+        time.sleep(0.2)
+        robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=1))
+        try:
+            wait_for_gravity_compensation(
+                robot._arm, leader_timestamp, timeout=3.0
+            )
+            return normalized_anchor
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt < attempts:
+                print(
+                    f"Teach mode entry not acknowledged; retrying "
+                    f"({attempt + 1}/{attempts}).",
+                    flush=True,
+                )
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Teach mode entry was not attempted")
+
+
+def show_recording_stopped_countdown(seconds: int = 5) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = max(0, math.ceil(deadline - time.monotonic()))
+        canvas = np.zeros((180, 900, 3), dtype=np.uint8)
+        cv2.putText(
+            canvas,
+            "Recording stopped - release robot and step away",
+            (24, 68),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            f"Returning to Safe Bicep in {remaining} seconds",
+            (24, 125),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (80, 210, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.imshow("NERO teach task", canvas)
+        cv2.waitKey(50)
+        if remaining == 0:
+            return
+
+
+def main(
+    task: str,
+    output: Path,
+    follower_anchor: list[float],
+    variation: str = "",
+) -> None:
     robot = Nero(NeroConfig(
         id="nero_teach",
         bitrate=1_000_000,
@@ -131,20 +275,31 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     _, gripper_timestamp = read_gripper_state(effector, last_gripper)
     cv2.namedWindow("NERO teach task", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO teach task", 900, 180)
-    print(f"Teach mode active. Move the robot manually; samples are recorded at {FPS} FPS.")
-    print("Press q in the teach window to save the task.")
+    print("Entering gravity-compensated Teach mode...", flush=True)
 
     shutdown_hold_target: list[float] | None = None
+    recording_anchor = follower_anchor.copy()
+    teach_mode_active = False
     try:
-        robot.set_teach_mode(True)
-        enable_can_feedback_push(robot._arm)
-        robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=1))
+        recording_anchor = enter_gravity_compensation(robot)
+        anchor_shift = [
+            actual - requested
+            for actual, requested in zip(recording_anchor, follower_anchor)
+        ]
+        print(
+            "Teach conversion anchor captured after controller normalization: "
+            f"anchor={recording_anchor} shift={anchor_shift}",
+            flush=True,
+        )
+        teach_mode_active = True
+        print(f"Teach mode active. Move the robot manually; samples are recorded at {FPS} FPS.")
+        print("Press Spacebar in the teach window to save the task.")
         if hasattr(effector, "set_gripper_teaching_pendant_param"):
             configured = effector.set_gripper_teaching_pendant_param(
                 teaching_range_per=100,
                 max_range_config=0.1,
                 teaching_friction=1,
-                timeout=5.0,
+                timeout=GRIPPER_CONFIG_TIMEOUT_S,
             )
             print(
                 f"Leader gripper teaching parameters "
@@ -154,6 +309,8 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
         last_gripper = wait_for_fresh_gripper_feedback(
             effector, gripper_timestamp
         )
+        play_recording_start_beep()
+        next_sample = time.monotonic()
         while True:
             now = time.monotonic()
             if now >= next_sample:
@@ -201,25 +358,38 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
             canvas = np.zeros((180, 900, 3), dtype=np.uint8)
             cv2.putText(canvas, "TEACH MODE - move the robot manually", (24, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(canvas, f"Samples: {len(sequence)}    Gripper: {last_gripper[1]:.3f} {last_gripper[0]}", (24, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 220, 255), 1, cv2.LINE_AA)
-            cv2.putText(canvas, "Backdrive arm and gripper    q: save", (24, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 220, 255), 1, cv2.LINE_AA)
+            cv2.putText(canvas, "Backdrive arm and gripper    Spacebar: save", (24, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 220, 255), 1, cv2.LINE_AA)
             cv2.imshow("NERO teach task", canvas)
             key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
+            if key == ord(" "):
+                print(
+                    "Recording stopped; release robot and step away. "
+                    "Returning to Safe Bicep in 5 seconds.",
+                    flush=True,
+                )
+                show_recording_stopped_countdown()
                 if sequence:
-                    converted = convert_leader_samples(sequence, follower_anchor)
-                    shutdown_hold_target = [
-                        float(value) for value in converted[-1]["joints"]
-                    ]
+                    shutdown_hold_target = follower_hold_target(
+                        robot.get_teach_joint_angles(),
+                        [float(value) for value in sequence[0]["joints"]],
+                        recording_anchor,
+                    )
                 break
             time.sleep(0.005)
     finally:
         try:
-            robot._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=2))
-        except Exception:
-            pass
-        finally:
             robot.set_teach_mode(False, hold_target=shutdown_hold_target)
+        except Exception as exc:
+            if teach_mode_active:
+                raise
+            print(f"Teach entry cleanup command was rejected: {exc}", flush=True)
+        finally:
             cv2.destroyAllWindows()
+            if not teach_mode_active or len(sequence) < 2:
+                try:
+                    robot.emergency_disconnect()
+                except Exception as exc:
+                    print(f"Teach entry transport cleanup failed: {exc}", flush=True)
 
     if len(sequence) < 2:
         safe_bicep_shutdown(robot, "Teach shutdown")
@@ -236,14 +406,15 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     recording = {
         "task": task,
+        "variation": variation,
         "fps": FPS,
         "joint_space": "leader",
-        "follower_anchor": follower_anchor,
+        "follower_anchor": recording_anchor,
         "samples": sequence,
     }
     output.write_text(json.dumps(recording, indent=2))
     try:
-        sequence = convert_leader_samples(sequence, follower_anchor)
+        sequence = convert_leader_samples(sequence, recording_anchor)
     except ValueError as exc:
         recording["replay_ready"] = False
         recording["replay_error"] = str(exc)
@@ -255,9 +426,10 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
     sequence = append_safe_bicep_return(sequence)
     output.write_text(json.dumps({
         "task": task,
+        "variation": variation,
         "fps": FPS,
         "joint_space": "follower",
-        "follower_anchor": follower_anchor,
+        "follower_anchor": recording_anchor,
         "safe_bicep_return": True,
         "replay_ready": True,
         "samples": sequence,
@@ -269,7 +441,18 @@ def main(task: str, output: Path, follower_anchor: list[float]) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Record a manually taught NERO trajectory.")
     parser.add_argument("--task", required=True)
+    parser.add_argument("--variation", default="")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--follower-anchor", type=float, nargs=7, required=True)
     args = parser.parse_args()
-    main(args.task, args.output, args.follower_anchor)
+    try:
+        main(args.task, args.output, args.follower_anchor, args.variation)
+    except RuntimeError as exc:
+        print(f"Teach task unavailable: {exc}", flush=True)
+        if "Teach mode did not enter gravity compensation" in str(exc):
+            print(
+                "The controller rejected Teach mode. Power-cycle the arm controller "
+                "before trying Teach Task again.",
+                flush=True,
+            )
+        raise SystemExit(2) from None

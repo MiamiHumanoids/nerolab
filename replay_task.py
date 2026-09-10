@@ -12,9 +12,11 @@ from lerobot_robot_nero import Nero, NeroConfig
 from task_trajectory import (
     amplify_gripper_samples,
     command_recorded_gripper,
+    hold_gripper_grasp_pose,
+    is_amplified_gripper_closing,
     is_amplified_gripper_opening,
     prepare_gripper_for_replay,
-    prepare_replay_samples,
+    prepare_task_execution_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
     stream_recorded_trajectory,
@@ -38,7 +40,7 @@ def arm_status_text(robot: Nero) -> str:
 
 def main(task_file: Path, amplified_gripper: bool = False) -> None:
     recording = json.loads(task_file.read_text())
-    samples = prepare_replay_samples(recording)
+    samples = prepare_task_execution_samples(recording)
     if amplified_gripper:
         samples = amplify_gripper_samples(samples)
 
@@ -94,6 +96,14 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
                     "Task replay",
                 )
             previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
+            if amplified_gripper and is_amplified_gripper_closing(
+                sample, previous_grasping
+            ):
+                timeline_pause += hold_gripper_grasp_pose(
+                    robot,
+                    [float(value) for value in sample["joints"]],
+                    "Task replay",
+                )
             previous_grasping = bool(sample.get("gripper_grasping", False))
             if index == 0 or index % 25 == 0:
                 print(f"Replay sample {index + 1}/{len(samples)} | {arm_status_text(robot)}")

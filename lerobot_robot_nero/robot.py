@@ -11,6 +11,7 @@ from lerobot.processor import RobotAction, RobotObservation
 from lerobot.robots import Robot
 
 from pyAgxArm import AgxArmFactory, ArmModel, create_agx_arm_config
+from pyAgxArm.protocols.can_protocol.msgs.nero.default import ArmMsgMotionCtrl
 
 from .camera import IntelRealSenseD405, OpenCVWebcam
 from .config import NeroConfig
@@ -26,6 +27,7 @@ class Nero(Robot):
     GRIPPER_WIDTH_MAX_M = 0.1
     GRIPPER_FORCE_MIN = 0.0
     GRIPPER_FORCE_MAX = 30.0
+    ERROR_CONTROL_CAN_IDS = frozenset({0x151, 0x155, 0x159})
 
     def __init__(self, config: NeroConfig):
         super().__init__(config)
@@ -33,6 +35,7 @@ class Nero(Robot):
         self._arm = None
         self._gripper_effector = None
         self._last_gripper_feedback = (self.GRIPPER_WIDTH_MAX_M, 0.0)
+        self.last_can_recovery_ids: set[int] = set()
         self._teach_mode_enabled = False
         self._camera = IntelRealSenseD405(
             device_index=0,
@@ -67,6 +70,106 @@ class Nero(Robot):
     @property
     def is_connected(self) -> bool:
         return bool(self._arm is not None and getattr(self._arm, "is_connected", lambda: False)())
+
+    def has_live_arm_feedback(self, timeout: float = 0.0) -> bool:
+        if not self.is_connected:
+            return False
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                status = self._arm.get_arm_status()
+                message = getattr(status, "msg", status)
+                joints = self.get_joint_angles()
+                if message is not None and len(joints) == len(self.JOINT_KEYS):
+                    return True
+            except Exception:
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def restore_live_arm_feedback(
+        self, attempts: int = 3, timeout_per_attempt: float = 2.0
+    ) -> bool:
+        self.last_can_recovery_ids.clear()
+        for attempt in range(attempts):
+            feedback_live, observed_ids = self._wait_for_feedback_and_can_ids(
+                timeout_per_attempt
+            )
+            if feedback_live:
+                return True
+            if observed_ids & self.ERROR_CONTROL_CAN_IDS:
+                self.last_can_recovery_ids = (
+                    observed_ids & self.ERROR_CONTROL_CAN_IDS
+                )
+                self._recover_error_control_traffic()
+                if self.has_live_arm_feedback(timeout=timeout_per_attempt):
+                    return True
+            if attempt + 1 < attempts:
+                self._enable_can_feedback()
+        return False
+
+    def _wait_for_feedback_and_can_ids(
+        self, timeout: float
+    ) -> tuple[bool, set[int]]:
+        observed_ids: set[int] = set()
+        context = getattr(self._arm, "_ctx", None)
+        callbacks = getattr(context, "_parser_packet_fun_list", None)
+
+        def observe(message) -> None:
+            arbitration_id = getattr(message, "arbitration_id", None)
+            if arbitration_id is not None:
+                observed_ids.add(int(arbitration_id))
+
+        if callbacks is None:
+            return self.has_live_arm_feedback(timeout=timeout), observed_ids
+        callbacks.append(observe)
+        try:
+            return self.has_live_arm_feedback(timeout=timeout), observed_ids
+        finally:
+            try:
+                callbacks.remove(observe)
+            except ValueError:
+                pass
+
+    def _recover_error_control_traffic(self) -> None:
+        self._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=0x02))
+        time.sleep(0.2)
+        self._arm.set_follower_mode()
+        time.sleep(0.2)
+        self._arm.reset()
+        time.sleep(1.0)
+        self.configure()
+        self._enable_can_feedback()
+
+    def recover_stuck_teach_state(self, timeout: float = 3.0) -> bool:
+        status = self.get_arm_status()
+        message = getattr(status, "msg", status)
+        ctrl_mode = str(getattr(message, "ctrl_mode", ""))
+        teach_status = str(getattr(message, "teach_status", ""))
+        if not (
+            "LINKAGE_TEACHING_INPUT_MODE" in ctrl_mode
+            or "TERMINATE_EXECUTION" in teach_status
+        ):
+            return False
+
+        self._recover_error_control_traffic()
+        deadline = time.monotonic() + timeout
+        ctrl_mode = "unknown"
+        teach_status = "unknown"
+        while time.monotonic() < deadline:
+            status = self.get_arm_status()
+            message = getattr(status, "msg", status)
+            ctrl_mode = str(getattr(message, "ctrl_mode", "unknown"))
+            teach_status = str(getattr(message, "teach_status", "unknown"))
+            if "CAN_CTRL" in ctrl_mode:
+                return True
+            time.sleep(0.05)
+        raise RuntimeError(
+            "NERO controller did not return to CAN control after Teach exit and "
+            f"follower/reset recovery; ctrl_mode={ctrl_mode}, "
+            f"teach_status={teach_status}"
+        )
 
     def _prepare_can_backend(self) -> None:
         if os.name == "nt" and self.config.can_interface == "gs_usb":
@@ -223,7 +326,7 @@ class Nero(Robot):
             time.sleep(1.0)
         logger.info("Enabling NERO CAN feedback")
         self._enable_can_feedback()
-        if hasattr(self._arm, "enable"):
+        if self.config.enable_on_connect and hasattr(self._arm, "enable"):
             logger.info("Enabling NERO arm joints")
             deadline = time.monotonic() + 5.0
             enabled = False
@@ -264,28 +367,42 @@ class Nero(Robot):
                 self._arm.set_follower_mode()
             else:
                 raise AttributeError("Nero robot does not expose a teaching mode API")
-            if hasattr(self._arm, "disable"):
-                self._arm.disable()
             self._teach_mode_enabled = True
         else:
+            target = (
+                [float(value) for value in hold_target]
+                if hold_target is not None
+                else None
+            )
+            if hasattr(self._arm, "_send_msg"):
+                self._arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=0x02))
+                time.sleep(0.2)
             if hasattr(self._arm, "set_follower_mode"):
                 self._arm.set_follower_mode()
-                time.sleep(0.5)
+                if target is not None:
+                    move_js = getattr(self._arm, "move_js", None)
+                    if move_js is None:
+                        raise RuntimeError(
+                            "NERO arm cannot preload the taught pose before releasing brakes"
+                        )
+                    move_js(target)
+                time.sleep(0.2 if target is not None else 0.5)
             elif hasattr(self._arm, "set_normal_mode"):
                 self._arm.set_normal_mode()
             else:
                 raise AttributeError("Nero robot does not expose a non-teach mode API")
-            if hasattr(self._arm, "reset"):
+            if target is None and hasattr(self._arm, "reset"):
                 self._arm.reset()
                 time.sleep(1.0)
             self.configure()
-            if hold_target is not None:
+            self._enable_can_feedback()
+            if target is not None:
                 move_js = getattr(self._arm, "move_js", None)
                 if move_js is None:
                     raise RuntimeError(
                         "NERO arm cannot preload the taught pose before releasing brakes"
                     )
-                move_js([float(value) for value in hold_target])
+                move_js(target)
             if hasattr(self._arm, "enable"):
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline:
@@ -294,8 +411,8 @@ class Nero(Robot):
                     time.sleep(0.1)
                 else:
                     raise RuntimeError("NERO arm joints did not re-enable after leaving Teach mode")
-            if hold_target is not None:
-                self._arm.move_js([float(value) for value in hold_target])
+            if target is not None:
+                self._arm.move_js(target)
             self._teach_mode_enabled = False
 
     def get_joint_angles(self) -> list[float]:
@@ -469,6 +586,16 @@ class Nero(Robot):
             except Exception:
                 logger.debug("Ignoring SDK disconnect failure", exc_info=True)
             self._arm = None
+
+    def emergency_disconnect(self) -> None:
+        arm = self._arm
+        if arm is None:
+            return
+        try:
+            if self.is_connected and hasattr(arm, "electronic_emergency_stop"):
+                arm.electronic_emergency_stop()
+        finally:
+            self.disconnect(disable_arm=False)
 
     def get_arm_status(self) -> Any:
         if not self.is_connected:
