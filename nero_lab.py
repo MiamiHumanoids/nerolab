@@ -19,10 +19,11 @@ import re
 from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING
 
-from dataset_episode_labels import read_episode_display_labels
+from dataset_episode_labels import load_dataset_display_name, read_episode_display_labels
 from task_trajectory import (
     SAFE_BICEP_JOINTS,
     format_cli_float,
+    is_powered_safe_bicep_pose,
     is_safe_bicep_pose,
     prepare_replay_samples,
     safe_bicep_recovery_pose,
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from lerobot_robot_nero import Nero, NeroConfig
     from lerobot_robot_nero.azure_storage import AzureNeroStorage
 
-APP_BUILD = "2026-09-10-guided-recording-workflow-101"
+APP_BUILD = "2026-09-11-rollback-motion-117"
 APP_DISPLAY_NAME = "Nero Lab"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
@@ -61,6 +62,7 @@ TASK_REPLAYER = PROJECT_ROOT / "replay_task.py"
 POLICY_RUNNER = PROJECT_ROOT / "run_smolvla_nero.py"
 EPISODE_DELETER = PROJECT_ROOT / "delete_dataset_episode.py"
 RERUN_PYAV_WRAPPER = PROJECT_ROOT / "lerobot_dataset_viz_pyav.py"
+LEROBOT_REPLAY_PYAV_WRAPPER = PROJECT_ROOT / "lerobot_replay_pyav.py"
 
 
 def resolve_cli(name: str) -> str:
@@ -72,11 +74,62 @@ def resolve_cli(name: str) -> str:
 
 
 RERUN = resolve_cli("lerobot-dataset-viz")
+LE_ROBOT_REPLAY = LEROBOT_REPLAY_PYAV_WRAPPER
 LE_ROBOT_TRAIN = resolve_cli("lerobot-train")
 LE_ROBOT_EVAL = resolve_cli("lerobot-eval")
 WINDOWS_INSTANCE_MUTEX = "Local\\NeroLabGui"
 WINDOWS_APP_USER_MODEL_ID = "NeroLab.Desktop"
 ROBOT_ARM_ICON = PROJECT_ROOT / "assets" / "nero_robot_arm.ico"
+LEROBOT_REPLAY_SAFE_TOLERANCE_RAD = 0.04
+ENABLED_SAFE_BICEP_COMPLETION_LABELS = {
+    "Teach task",
+    "Replay task",
+    "Replay trained task",
+    "LeRobot replay",
+}
+
+
+def lerobot_replay_command(
+    executable: str,
+    dataset_root: Path,
+    episode_index: int,
+) -> list[str]:
+    repo_id = (
+        "adrian/nero_replayed"
+        if dataset_root.name.startswith("nero_replayed__")
+        else "adrian/nero_manual"
+    )
+    return [
+        sys.executable,
+        str(executable),
+        "--robot.type=nero",
+        "--robot.reset_on_connect=false",
+        f"--dataset.repo_id={repo_id}",
+        f"--dataset.root={dataset_root}",
+        f"--dataset.episode={episode_index}",
+    ]
+
+
+def is_lerobot_replay_start_pose(values: list[float]) -> bool:
+    return is_safe_bicep_pose(
+        values,
+        target_tolerance=LEROBOT_REPLAY_SAFE_TOLERANCE_RAD,
+    )
+
+
+def task_layout_image_path(task_file: Path, recording: dict[str, object]) -> Path | None:
+    setup = recording.get("initial_table_setup")
+    if not isinstance(setup, dict) or not isinstance(setup.get("path"), str):
+        return None
+    image_path = (task_file.parent / setup["path"]).resolve()
+    setup_directory = (task_file.parent / "setup_images").resolve()
+    if image_path.parent != setup_directory or not image_path.is_file():
+        return None
+    return image_path
+
+
+def requires_enabled_safe_bicep_completion(label: str) -> bool:
+    return label in ENABLED_SAFE_BICEP_COMPLETION_LABELS
 
 
 def load_runtime_dependencies() -> None:
@@ -196,12 +249,15 @@ def read_dataset_info(root: Path) -> DatasetInfo:
     info_path = root / "meta" / "info.json"
     tasks_path = root / "meta" / "tasks.parquet"
     complete = info_path.exists() and tasks_path.exists()
-    task = root.name
-    for prefix in ("nero_manual__", "nero_replayed__"):
-        if task.startswith(prefix):
-            task = task.removeprefix(prefix)
-            break
-    task = task.replace("-", " ")
+    task = load_dataset_display_name(root)
+    if not task:
+        task = root.name
+        for prefix in ("nero_manual__", "nero_replayed__"):
+            if task.startswith(prefix):
+                task = task.removeprefix(prefix)
+                break
+        task = re.sub(r"__30fps(?:__.*)?$", "", task)
+        task = task.replace("__", " ").replace("-", " ").title()
     episodes = frames = 0
     action_dim = None
     if info_path.exists():
@@ -368,15 +424,27 @@ class NeroLab(tk.Tk):
 
     def close_application(self) -> None:
         robot = self.robot
-        self.robot = None
         try:
-            if robot is not None:
-                robot.emergency_disconnect()
-        except Exception:
-            pass
-        finally:
-            self.stop_windows_can(log=False)
-            self.destroy()
+            if robot is not None and robot.is_connected:
+                current = [float(value) for value in robot.get_joint_angles()]
+                if not is_powered_safe_bicep_pose(current):
+                    self.safe_bicep_reset()
+                    current = [float(value) for value in robot.get_joint_angles()]
+                if not is_powered_safe_bicep_pose(current):
+                    raise RuntimeError(
+                        f"Safe Bicep target was not reached; current joints={current}"
+                    )
+                robot.disconnect(disable_arm=False)
+                self.robot = None
+        except Exception as exc:
+            messagebox.showerror(
+                "Safe shutdown required",
+                "Nero Lab remains open because the arm could not be secured at "
+                f"powered Safe Bicep:\n\n{exc}",
+            )
+            return
+        self.stop_windows_can(log=False)
+        self.destroy()
 
     def report_callback_exception(self, exc_type, exc_value, exc_traceback) -> None:
         if self.robot is not None and self.robot.is_connected:
@@ -424,7 +492,14 @@ class NeroLab(tk.Tk):
         task_buttons = ttk.Frame(left)
         task_buttons.pack(fill="x")
         ttk.Button(task_buttons, text="Delete task", command=self.delete_taught_task).pack(side="left", expand=True, fill="x", padx=(0, 4))
-        ttk.Button(task_buttons, text="Replay task", command=self.replay_task).pack(side="left", expand=True, fill="x", padx=(4, 0))
+        ttk.Button(task_buttons, text="Replay task", command=self.replay_task).pack(side="left", expand=True, fill="x", padx=4)
+        self.view_task_layout_button = ttk.Button(
+            task_buttons,
+            text="View Task Layout Image",
+            command=self.open_task_layout_image,
+            state="disabled",
+        )
+        self.view_task_layout_button.pack(side="left", expand=True, fill="x", padx=(4, 0))
 
         ttk.Label(left, text="Saved datasets", style="Section.TLabel").pack(anchor="w", pady=(12, 0))
         self.dataset_list = tk.Listbox(left, exportselection=False, height=18)
@@ -443,6 +518,11 @@ class NeroLab(tk.Tk):
             left,
             text="Review via LeRobot Viewer (Rerun)",
             command=self.open_rerun,
+        ).pack(fill="x", pady=(0, 6))
+        ttk.Button(
+            left,
+            text="Replay with LeRobot Replay",
+            command=self.replay_with_lerobot,
         ).pack(fill="x", pady=(0, 6))
         ttk.Button(left, text="Delete selected episode", command=self.delete_episode).pack(fill="x", pady=(0, 6))
         ttk.Button(left, text="Delete selected dataset", command=self.delete_dataset).pack(fill="x")
@@ -638,6 +718,11 @@ class NeroLab(tk.Tk):
         ttk.Label(inference, text="Prompt examples: pick up the banana; move the owl to the green notebook.", foreground="#555555").pack(anchor="w")
 
     def connect_robot(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.log_message(
+                "Arm connection deferred while the active task process owns CAN."
+            )
+            return
         if not self.runtime_services_ready:
             self.log_message(
                 "Arm connection unavailable: runtime dependencies are still loading"
@@ -784,7 +869,12 @@ class NeroLab(tk.Tk):
             self.robot.disconnect(disable_arm=disable_arm and not emergency_brake)
             self.robot = None
         self.arm_status_var.set("Arm status: not connected")
-        self.log_message("Arm disconnected")
+        if not emergency_brake and not disable_arm:
+            self.log_message(
+                "GUI released CAN for task handoff; arm remains enabled."
+            )
+        else:
+            self.log_message("Arm disconnected")
         if os.name == "nt":
             self.set_can_status("CAN status: available (not started)", "#8a5a00")
         elif sys.platform.startswith("linux"):
@@ -1314,8 +1404,9 @@ class NeroLab(tk.Tk):
                         "Could not restore live CAN feedback; power-cycle the arm and reconnect"
                     )
             self.log_arm_debug("Re-enable before recovery")
+            hold_target = [float(value) for value in robot.get_joint_angles()]
             try:
-                robot.set_teach_mode(False)
+                robot.set_teach_mode(False, hold_target=hold_target)
             except RuntimeError:
                 if not robot.recover_stuck_teach_state():
                     raise
@@ -1611,6 +1702,18 @@ class NeroLab(tk.Tk):
                 f"{AzureNeroStorage.describe_error(exc)}",
             )
 
+    def _upload_task_artifacts_to_azure(self, task_file: Path) -> None:
+        self._upload_to_azure(task_file, "tasks")
+        try:
+            recording = json.loads(task_file.read_text())
+            setup = recording.get("initial_table_setup")
+            if isinstance(setup, dict) and isinstance(setup.get("path"), str):
+                setup_path = (task_file.parent / setup["path"]).resolve()
+                if setup_path.is_file():
+                    self._upload_to_azure(setup_path, "tasks")
+        except (OSError, ValueError, TypeError):
+            return
+
     def _delete_from_azure(self, path: Path, category: str) -> None:
         if self.azure_storage is None:
             return
@@ -1635,8 +1738,8 @@ class NeroLab(tk.Tk):
         ]
         self.dataset_list.delete(0, "end")
         for item in self.datasets:
-            marker = "OK" if item.complete else "INCOMPLETE"
-            self.dataset_list.insert("end", f"[{marker}] {item.root.name}")
+            label = item.task if item.complete else f"{item.task} (incomplete)"
+            self.dataset_list.insert("end", label)
         if self.datasets:
             selected_index = next(
                 (
@@ -1663,7 +1766,7 @@ class NeroLab(tk.Tk):
             return
         item = self.datasets[selection[0]]
         self.selected_root = item.root
-        self.selected_dataset_var.set(f"Selected dataset: {item.root.name}")
+        self.selected_dataset_var.set(f"Selected dataset: {item.task}")
         self.dataset_target_var.set("selected")
         self.episode_list.delete(0, "end")
         for label in item.episode_labels:
@@ -1702,6 +1805,7 @@ class NeroLab(tk.Tk):
             self.task_list.see(index)
         else:
             self.selected_task_var.set("Selected task: none")
+        self._update_task_layout_button()
 
     def _select_taught_task(self, _event: object = None) -> None:
         selection = self.task_list.curselection()
@@ -1720,8 +1824,49 @@ class NeroLab(tk.Tk):
                 f"Selected taught task: {task}"
                 + (f" - {variation}" if variation else "")
             )
+            setup = recording.get("initial_table_setup")
+            if isinstance(setup, dict) and isinstance(setup.get("path"), str):
+                setup_path = self.taught_task_file.parent / setup["path"]
+                self.log_message(f"Initial table setup image: {setup_path}")
         except (OSError, ValueError, TypeError) as exc:
             self.log_message(f"Could not load taught task: {exc}")
+        self._update_task_layout_button()
+
+    def _selected_task_layout_image(self) -> Path | None:
+        if self.taught_task_file is None or not self.taught_task_file.is_file():
+            return None
+        try:
+            recording = json.loads(self.taught_task_file.read_text())
+        except (OSError, ValueError, TypeError):
+            return None
+        return task_layout_image_path(self.taught_task_file, recording)
+
+    def _update_task_layout_button(self) -> None:
+        state = "normal" if self._selected_task_layout_image() is not None else "disabled"
+        self.view_task_layout_button.configure(state=state)
+
+    def open_task_layout_image(self) -> None:
+        image_path = self._selected_task_layout_image()
+        if image_path is None:
+            messagebox.showwarning(
+                "Task layout image unavailable",
+                "The selected taught task does not have a saved table layout image.",
+            )
+            self._update_task_layout_button()
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(image_path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(image_path)])
+            else:
+                subprocess.Popen(["xdg-open", str(image_path)])
+            self.log_message(f"Opened task layout image: {image_path}")
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not open task layout image",
+                f"Could not open the saved image:\n\n{exc}",
+            )
 
     def delete_taught_task(self) -> None:
         selection = self.task_list.curselection()
@@ -1731,8 +1876,21 @@ class NeroLab(tk.Tk):
         task_file = self.taught_task_files[selection[0]]
         if not messagebox.askyesno("Delete taught task", f"Delete this taught task permanently?\n\n{task_file}"):
             return
+        setup_path: Path | None = None
+        try:
+            recording = json.loads(task_file.read_text())
+            setup = recording.get("initial_table_setup")
+            if isinstance(setup, dict) and isinstance(setup.get("path"), str):
+                candidate = (task_file.parent / setup["path"]).resolve()
+                if candidate.parent == (task_file.parent / "setup_images").resolve():
+                    setup_path = candidate
+                    setup_path.unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError):
+            pass
         task_file.unlink(missing_ok=True)
         self._delete_from_azure(task_file, "tasks")
+        if setup_path is not None:
+            self._delete_from_azure(setup_path, "tasks")
         if self.taught_task_file == task_file:
             self.taught_task_file = None
         self.refresh_tasks()
@@ -1822,7 +1980,10 @@ class NeroLab(tk.Tk):
         self.after(0, self.log_message, f"{label} exited with code {code}")
         sync_target = self.azure_sync_targets.pop(label, None)
         if code == 0 and sync_target is not None:
-            self._upload_to_azure(*sync_target)
+            if label == "Teach task":
+                self._upload_task_artifacts_to_azure(sync_target[0])
+            else:
+                self._upload_to_azure(*sync_target)
         if label == "Teach task":
             if code == 0:
                 self.after(0, self.refresh_tasks)
@@ -1832,9 +1993,62 @@ class NeroLab(tk.Tk):
                     self.status_var.set,
                     "Teach mode unavailable; controller power cycle may be required",
                 )
-            self.after(0, self.connect_robot)
+            self.after(0, self._restore_safe_bicep_after_teach)
+        if label == "LeRobot replay":
+            self.after(0, self._restore_safe_bicep_after_lerobot_replay)
+        if (
+            requires_enabled_safe_bicep_completion(label)
+            and label not in {"Teach task", "LeRobot replay"}
+        ):
+            self.after(
+                0,
+                self._restore_enabled_safe_bicep_after_task,
+                label,
+            )
         if label in {"Episode deletion", "Replay trained task", "Recorder"} and code == 0:
             self.after(0, self.refresh_datasets)
+
+    def _restore_safe_bicep_after_lerobot_replay(self) -> None:
+        NeroLab._restore_enabled_safe_bicep_after_task(self, "LeRobot replay")
+
+    def _restore_safe_bicep_after_teach(self) -> None:
+        NeroLab._restore_enabled_safe_bicep_after_task(self, "Teach")
+
+    def _restore_enabled_safe_bicep_after_task(self, workflow: str) -> None:
+        self.log_message(
+            f"{workflow} ended; restoring Safe Bicep while keeping the arm enabled."
+        )
+        try:
+            self.connect_robot()
+            if self.robot is None or not self.robot.is_connected:
+                raise RuntimeError("could not reconnect to the arm")
+            current = [float(value) for value in self.robot.get_joint_angles()]
+            if not is_powered_safe_bicep_pose(current):
+                self.reenable_arm()
+                if self.robot is None or not self.robot.is_connected:
+                    raise RuntimeError("arm connection was lost during re-enable")
+                self.safe_bicep_reset()
+                current = [float(value) for value in self.robot.get_joint_angles()]
+            if not is_powered_safe_bicep_pose(current):
+                raise RuntimeError(
+                    f"Safe Bicep target was not reached; current joints={current}"
+                )
+        except Exception as exc:
+            self.safe_bicep_position_reached = False
+            self.set_arm_status_display(
+                f"Post-{workflow} Safe Bicep recovery failed: {exc}",
+                emergency=True,
+            )
+            self.log_message(
+                f"POST-{workflow.upper()} SAFETY RECOVERY FAILED: {exc}"
+            )
+            return
+        self.safe_bicep_position_reached = True
+        self.set_joint_slider_values(current)
+        self.set_arm_status_display("Arm status: Safe Bicep | enabled", color="#008000")
+        self.log_message(
+            f"{workflow} complete; Safe Bicep reached and arm remains enabled."
+        )
 
     def record_dataset(self) -> None:
         task = self.task_var.get().strip()
@@ -1882,21 +2096,23 @@ class NeroLab(tk.Tk):
             message = getattr(status, "msg", status)
             arm_status = str(getattr(message, "arm_status", ""))
             if "EMERGENCY_STOP" in arm_status or "EMERGENCY STOP" in arm_status:
-                self.log_message("Re-enabling brake-settled arm for task handoff")
+                self.log_message(
+                    "Latching current joints before releasing brakes for task handoff"
+                )
                 self.reenable_arm()
-                current = [float(value) for value in self.robot.get_joint_angles()]
-                if self.is_safe_bicep_position(current):
-                    self.log_message(
-                        "Brake-settled Safe Bicep pose verified; skipping redundant reset motion"
-                    )
-                else:
-                    self.safe_bicep_reset()
+            current = [float(value) for value in self.robot.get_joint_angles()]
+            if is_powered_safe_bicep_pose(current):
+                self.log_message(
+                    "Powered Safe Bicep pose verified; skipping redundant reset motion"
+                )
+            else:
+                self.safe_bicep_reset()
         except Exception as exc:
             self.log_message(f"Could not prepare arm for task handoff: {exc}")
             return False
         try:
             current = self.robot.get_joint_angles()
-            safe = self.is_safe_bicep_position(current)
+            safe = is_powered_safe_bicep_pose(current)
             if safe:
                 self.task_handoff_anchor = [float(value) for value in current]
         except Exception as exc:
@@ -1961,6 +2177,7 @@ class NeroLab(tk.Tk):
                 return
             dataset_root = DATASET_BASE / f"nero_replayed__{self._task_slug(dataset_name)}__30fps"
         else:
+            dataset_name = None
             selected = self.selected_complete()
             if selected is None:
                 return
@@ -1976,6 +2193,8 @@ class NeroLab(tk.Tk):
             "--dataset-root", str(dataset_root),
             "--variation", variation,
         ]
+        if dataset_name is not None:
+            command.extend(["--dataset-name", dataset_name])
         if self.amplified_gripper_var.get():
             command.append("--amplified-gripper")
         self.azure_sync_targets["Replay trained task"] = (dataset_root, "datasets")
@@ -2031,9 +2250,104 @@ class NeroLab(tk.Tk):
             command = [sys.executable, str(RERUN_PYAV_WRAPPER), "--repo-id", repo_id, "--root", str(item.root), "--episode-index", str(self.selected_episode), "--mode", "local"]
             self.start_process(command, "Rerun")
 
-    def delete_dataset(self) -> None:
-        item = self.selected_complete() or next((entry for entry in self.datasets if entry.root == self.selected_root), None)
+    def replay_with_lerobot(self) -> None:
+        item = self.selected_complete()
         if item is None:
+            return
+        if not 0 <= self.selected_episode < item.episodes:
+            messagebox.showwarning(
+                "No episode",
+                "Select an episode to replay first.",
+            )
+            return
+        if not Path(LE_ROBOT_REPLAY).exists() and shutil.which(LE_ROBOT_REPLAY) is None:
+            messagebox.showerror(
+                "LeRobot Replay not found",
+                "Install the project environment with: python -m pip install -e .",
+            )
+            return
+        if not self._lerobot_replay_preflight():
+            return
+        if not messagebox.askyesno(
+            "Confirm robot motion",
+            f"Replay episode {self.selected_episode} on the physical NERO arm?",
+        ):
+            return
+        if not self._prepare_task_process(emergency_brake=False):
+            return
+        self.clear_activity_log()
+        self.start_process(
+            lerobot_replay_command(
+                LE_ROBOT_REPLAY,
+                item.root,
+                self.selected_episode,
+            ),
+            "LeRobot replay",
+        )
+
+    def _lerobot_replay_preflight(self) -> bool:
+        if self.robot is None or not self.robot.is_connected:
+            self.connect_robot()
+        if self.robot is None or not self.robot.is_connected:
+            messagebox.showwarning(
+                "Arm not ready",
+                "Connect the arm before using LeRobot Replay.",
+            )
+            return False
+        try:
+            status = self.robot.get_arm_status()
+            message = getattr(status, "msg", status)
+            ctrl_mode = str(getattr(message, "ctrl_mode", ""))
+            arm_status = str(getattr(message, "arm_status", ""))
+            current = [float(value) for value in self.robot.get_joint_angles()]
+        except Exception as exc:
+            messagebox.showerror(
+                "Arm status unavailable",
+                f"Could not verify that the arm is ready to replay:\n\n{exc}",
+            )
+            return False
+        unsafe_status = next(
+            (
+                state
+                for state in ("COLLISION_OCCURRED", "NO_SOLUTION", "SINGULARITY_POINT")
+                if state in arm_status
+            ),
+            None,
+        )
+        if "CAN_CTRL" not in ctrl_mode or unsafe_status is not None:
+            messagebox.showwarning(
+                "Arm not ready",
+                "LeRobot Replay is blocked until the controller is ready.\n\n"
+                f"Control mode: {ctrl_mode or 'unknown'}\n"
+                f"Arm status: {arm_status or 'unknown'}\n\n"
+                "Use Re-enable Arm and Safe Bicep Reset, then retry.",
+            )
+            return False
+        if is_lerobot_replay_start_pose(current):
+            return True
+        formatted = ", ".join(f"{value:.3f}" for value in current)
+        self.log_message(
+            f"LeRobot Replay blocked: arm is not at Safe Bicep; joints=[{formatted}]"
+        )
+        messagebox.showwarning(
+            "Safe Bicep required",
+            "LeRobot Replay is blocked because the arm is not in the Safe "
+            "Bicep start position.\n\nClick Safe Bicep Reset, verify the arm "
+            f"is settled, then retry.\n\nCurrent joints: [{formatted}]",
+        )
+        return False
+
+    def delete_dataset(self) -> None:
+        item = next(
+            (
+                entry
+                for entry in self.datasets
+                if entry.root == self.selected_root
+            ),
+            None,
+        )
+        if item is None:
+            messagebox.showwarning("No dataset", "Select a dataset first.")
             return
         if not messagebox.askyesno("Delete dataset", f"Delete this dataset permanently?\n\n{item.root}"):
             return
@@ -2048,6 +2362,18 @@ class NeroLab(tk.Tk):
             return
         if item.episodes <= 0:
             messagebox.showwarning("No episodes", "The selected dataset contains no saved episodes.")
+            return
+        if item.episodes == 1:
+            if not messagebox.askyesno(
+                "Delete only episode",
+                "This is the dataset's only episode, so the dataset will also "
+                f"be deleted permanently.\n\n{item.root}",
+            ):
+                return
+            shutil.rmtree(item.root)
+            self._delete_from_azure(item.root, "datasets")
+            self.log_message(f"Deleted only episode and dataset: {item.root}")
+            self.refresh_datasets()
             return
         if not messagebox.askyesno(
             "Delete episode",

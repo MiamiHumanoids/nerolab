@@ -7,6 +7,33 @@ import os
 from pathlib import Path
 
 LABELS_FILENAME = "episode_variations.json"
+DATASET_METADATA_FILENAME = "nero_dataset.json"
+
+
+def dataset_metadata_path(root: Path) -> Path:
+    return root / "meta" / DATASET_METADATA_FILENAME
+
+
+def load_dataset_display_name(root: Path) -> str:
+    path = dataset_metadata_path(root)
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("display_name", "")).strip()
+
+
+def save_dataset_display_name(root: Path, display_name: str) -> None:
+    name = display_name.strip()
+    if not name:
+        return
+    path = dataset_metadata_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps({"display_name": name}, indent=2) + "\n")
+    os.replace(temporary, path)
 
 
 def labels_path(root: Path) -> Path:

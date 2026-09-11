@@ -35,6 +35,11 @@ GRIPPER_RELEASE_TIMEOUT_S = 5.0
 GRIPPER_GRASP_SETTLE_S = 0.2
 TARGET_TOLERANCE = 0.01
 TARGET_TIMEOUT_S = 5.0
+JOINT_TARGET_CHANGE_TOLERANCE_RAD = 1e-5
+REPLAY_JOINT_LIMIT_MARGIN_RAD = 0.005
+TRAILING_HOLD_SECONDS = 1.0
+TRAILING_JOINT_TOLERANCE_RAD = 0.001
+TRAILING_GRIPPER_TOLERANCE_M = 0.0005
 REPLAY_FATAL_ARM_STATES = (
     "COLLISION_OCCURRED",
     "EMERGENCY_STOP",
@@ -92,6 +97,16 @@ def is_safe_bicep_pose(
     return any(
         all(abs(float(value) - target) <= tolerance for value, target in zip(values, pose))
         for pose, tolerance in poses
+    )
+
+
+def is_powered_safe_bicep_pose(
+    values: list[float],
+    tolerance: float = 0.1,
+) -> bool:
+    return len(values) == len(SAFE_BICEP_JOINTS) and all(
+        abs(float(value) - target) <= tolerance
+        for value, target in zip(values, SAFE_BICEP_JOINTS)
     )
 
 
@@ -388,8 +403,72 @@ def prepare_task_execution_samples(
             for value, target in zip(samples[-1]["joints"], SAFE_BICEP_JOINTS)
         )
     ):
-        return samples[:-1]
-    return samples
+        samples = samples[:-1]
+    return clamp_replay_targets(samples)
+
+
+def clamp_replay_targets(
+    samples: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    processed: list[dict[str, Any]] = []
+    clipped: dict[int, tuple[float, float]] = {}
+    for sample in samples:
+        target = [float(value) for value in sample["joints"]]
+        reachable = [
+            min(
+                max(value, lower + REPLAY_JOINT_LIMIT_MARGIN_RAD),
+                upper - REPLAY_JOINT_LIMIT_MARGIN_RAD,
+            )
+            for value, (lower, upper) in zip(target, COMMAND_JOINT_LIMITS)
+        ]
+        for index, (requested, commanded) in enumerate(zip(target, reachable)):
+            if requested != commanded:
+                previous = clipped.get(index, (requested, requested))
+                clipped[index] = (
+                    min(previous[0], requested),
+                    max(previous[1], requested),
+                )
+        processed.append({**sample, "joints": reachable})
+    for index, requested_range in clipped.items():
+        lower, upper = COMMAND_JOINT_LIMITS[index]
+        print(
+            f"Replay Joint {index + 1} targets clipped from "
+            f"{requested_range[0]:.6f}..{requested_range[1]:.6f} rad to "
+            f"{lower + REPLAY_JOINT_LIMIT_MARGIN_RAD:.6f}.."
+            f"{upper - REPLAY_JOINT_LIMIT_MARGIN_RAD:.6f} rad.",
+            flush=True,
+        )
+    return processed
+
+
+def trim_trailing_stationary_samples(
+    samples: list[dict[str, Any]],
+    keep_seconds: float = TRAILING_HOLD_SECONDS,
+) -> list[dict[str, Any]]:
+    if len(samples) < 2:
+        return samples
+    last_motion_index = 0
+    for index in range(1, len(samples)):
+        previous = samples[index - 1]
+        current = samples[index]
+        joint_changed = any(
+            abs(float(value) - float(prior)) > TRAILING_JOINT_TOLERANCE_RAD
+            for value, prior in zip(current["joints"], previous["joints"])
+        )
+        gripper_changed = abs(
+            float(current.get("gripper", GRIPPER_OPEN_WIDTH_M))
+            - float(previous.get("gripper", GRIPPER_OPEN_WIDTH_M))
+        ) > TRAILING_GRIPPER_TOLERANCE_M
+        if joint_changed or gripper_changed:
+            last_motion_index = index
+    cutoff_time = float(samples[last_motion_index]["time"]) + max(0.0, keep_seconds)
+    end_index = last_motion_index + 1
+    while (
+        end_index < len(samples)
+        and float(samples[end_index]["time"]) <= cutoff_time
+    ):
+        end_index += 1
+    return samples[:end_index]
 
 
 def resample_replay_samples(
@@ -443,7 +522,7 @@ def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:
     step_count = max(1, int(duration / STREAM_INTERVAL_S) + 1)
     move_js = getattr(robot._arm, "move_js", None)
     if move_js is None:
-        raise RuntimeError("Installed pyAgxArm does not provide move_js for taught-task replay")
+        raise RuntimeError("Installed pyAgxArm does not provide move_js for smooth task motion")
     print(
         f"{label}: smooth move to first sample in {duration:.2f}s ({step_count} steps) "
         f"start={start} target={target}."
@@ -531,7 +610,12 @@ def smooth_move_with_recovery(robot: Any, target: list[float], label: str) -> No
     smooth_move_to_target(robot, target, label)
 
 
-def safe_bicep_shutdown(robot: Any, label: str) -> None:
+def safe_bicep_shutdown(
+    robot: Any,
+    label: str,
+    engage_brakes: bool = True,
+    brake_on_failure: bool = True,
+) -> None:
     active_error = sys.exc_info()[1]
     cleanup_error: Exception | None = None
     motion_ready = True
@@ -552,16 +636,21 @@ def safe_bicep_shutdown(robot: Any, label: str) -> None:
             print(f"{label}: Safe Bicep reached.", flush=True)
     except Exception as error:
         cleanup_error = error
-    try:
-        robot.engage_brakes()
-        print(f"{label}: emergency-stop resting pose settled.", flush=True)
-    except Exception as error:
-        cleanup_error = cleanup_error or error
-    finally:
+    should_brake = engage_brakes or (
+        brake_on_failure and (not motion_ready or cleanup_error is not None)
+    )
+    if should_brake:
         try:
-            robot.disconnect(disable_arm=False)
+            robot.engage_brakes()
+            print(f"{label}: emergency-stop resting pose settled.", flush=True)
         except Exception as error:
             cleanup_error = cleanup_error or error
+    else:
+        print(f"{label}: arm remains enabled at Safe Bicep.", flush=True)
+    try:
+        robot.disconnect(disable_arm=False)
+    except Exception as error:
+        cleanup_error = cleanup_error or error
     if cleanup_error is not None:
         if active_error is not None:
             print(

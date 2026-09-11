@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import math
 import os
@@ -20,6 +21,46 @@ from task_trajectory import append_safe_bicep_return, convert_leader_samples, sa
 FPS = 50
 GRIPPER_CONFIG_TIMEOUT_S = 0.25
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
+TEACH_SHUTDOWN_COUNTDOWN_S = 3
+
+
+def capture_initial_table_setup(robot, output: Path) -> dict[str, object] | None:
+    camera = getattr(robot, "_overview_camera", None)
+    if camera is None:
+        print("Initial table setup image unavailable: no overview webcam configured.", flush=True)
+        return None
+    try:
+        if not camera.is_connected:
+            camera.connect()
+        frame = None
+        for _ in range(5):
+            frame = camera.capture_frame()
+            if frame is not None:
+                break
+            time.sleep(0.05)
+        if frame is None:
+            raise RuntimeError("overview webcam returned no frame")
+        rgb = np.asarray(frame)
+        if rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise RuntimeError(f"unexpected overview image shape {rgb.shape}")
+        image_dir = output.parent / "setup_images"
+        image_dir.mkdir(parents=True, exist_ok=True)
+        image_path = image_dir / f"{output.stem}__initial-table.jpg"
+        if not cv2.imwrite(str(image_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)):
+            raise RuntimeError(f"could not write {image_path}")
+        metadata = {
+            "path": image_path.relative_to(output.parent).as_posix(),
+            "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+            "camera": "overview_webcam",
+            "device_index": getattr(camera, "device_index", None),
+            "width": int(rgb.shape[1]),
+            "height": int(rgb.shape[0]),
+        }
+        print(f"Captured initial table setup: {image_path}", flush=True)
+        return metadata
+    except Exception as exc:
+        print(f"Initial table setup image unavailable: {exc}", flush=True)
+        return None
 
 
 def play_recording_start_beep() -> None:
@@ -253,6 +294,7 @@ def main(
         reset_on_connect=False,
     ))
     robot.connect(calibrate=False)
+    initial_table_setup = capture_initial_table_setup(robot, output)
     effector = robot._get_gripper_effector()
     if effector is None:
         raise RuntimeError("NERO gripper effector is unavailable")
@@ -364,10 +406,10 @@ def main(
             if key == ord(" "):
                 print(
                     "Recording stopped; release robot and step away. "
-                    "Returning to Safe Bicep in 5 seconds.",
+                    f"Returning to Safe Bicep in {TEACH_SHUTDOWN_COUNTDOWN_S} seconds.",
                     flush=True,
                 )
-                show_recording_stopped_countdown()
+                show_recording_stopped_countdown(TEACH_SHUTDOWN_COUNTDOWN_S)
                 if sequence:
                     shutdown_hold_target = follower_hold_target(
                         robot.get_teach_joint_angles(),
@@ -392,7 +434,12 @@ def main(
                     print(f"Teach entry transport cleanup failed: {exc}", flush=True)
 
     if len(sequence) < 2:
-        safe_bicep_shutdown(robot, "Teach shutdown")
+        safe_bicep_shutdown(
+            robot,
+            "Teach shutdown",
+            engage_brakes=False,
+            brake_on_failure=False,
+        )
         raise RuntimeError("Teach task was too short; record at least two samples.")
     start_time = float(sequence[0]["time"])
     for sample in sequence:
@@ -410,6 +457,7 @@ def main(
         "fps": FPS,
         "joint_space": "leader",
         "follower_anchor": recording_anchor,
+        "initial_table_setup": initial_table_setup,
         "samples": sequence,
     }
     output.write_text(json.dumps(recording, indent=2))
@@ -421,7 +469,12 @@ def main(
         output.write_text(json.dumps(recording, indent=2))
         print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
         print(f"Replay unavailable: {exc}", flush=True)
-        safe_bicep_shutdown(robot, "Teach shutdown")
+        safe_bicep_shutdown(
+            robot,
+            "Teach shutdown",
+            engage_brakes=False,
+            brake_on_failure=False,
+        )
         return
     sequence = append_safe_bicep_return(sequence)
     output.write_text(json.dumps({
@@ -432,10 +485,22 @@ def main(
         "follower_anchor": recording_anchor,
         "safe_bicep_return": True,
         "replay_ready": True,
+        "initial_table_setup": initial_table_setup,
         "samples": sequence,
     }, indent=2))
     print(f"Saved taught task: {output} ({len(sequence)} samples)", flush=True)
-    safe_bicep_shutdown(robot, "Teach shutdown")
+    try:
+        safe_bicep_shutdown(
+            robot,
+            "Teach shutdown",
+            engage_brakes=False,
+            brake_on_failure=False,
+        )
+    except RuntimeError as exc:
+        print(
+            f"Teach shutdown handed Safe Bicep recovery to Nero Lab: {exc}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

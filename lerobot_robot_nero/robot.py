@@ -23,6 +23,9 @@ class Nero(Robot):
     config_class = NeroConfig
     name = "nero"
     JOINT_KEYS = tuple(f"joint{i}.pos" for i in range(1, 8))
+    DATASET_JOINT_KEYS = tuple(f"Joint_{i}" for i in range(1, 8))
+    DATASET_GRIPPER_KEY = "Gripper"
+    DEFAULT_GRIPPER_FORCE = 3.0
     GRIPPER_WIDTH_MIN_M = 0.0
     GRIPPER_WIDTH_MAX_M = 0.1
     GRIPPER_FORCE_MIN = 0.0
@@ -225,12 +228,33 @@ class Nero(Robot):
                 raise ValueError(f"Expected {expected} action values, got {len(values)}")
             return [float(v) for v in values[: len(self.JOINT_KEYS)]]
 
+        if all(key in action for key in self.DATASET_JOINT_KEYS):
+            return [float(action[key]) for key in self.DATASET_JOINT_KEYS]
+
         values: list[float] = []
         for key in self.JOINT_KEYS:
             if key not in action:
                 raise KeyError(f"Missing required joint target '{key}' in action payload")
             values.append(float(action[key]))
         return values
+
+    def _build_gripper_target(self, action: RobotAction) -> tuple[float, float]:
+        if "action" in action:
+            values = list(action["action"])
+            width = float(values[-2])
+            force = float(values[-1])
+        elif self.DATASET_GRIPPER_KEY in action:
+            width = float(action[self.DATASET_GRIPPER_KEY])
+            force = self.DEFAULT_GRIPPER_FORCE
+        else:
+            raise KeyError(
+                f"Missing required gripper target '{self.DATASET_GRIPPER_KEY}' "
+                "in action payload"
+            )
+        return (
+            min(max(width, self.GRIPPER_WIDTH_MIN_M), self.GRIPPER_WIDTH_MAX_M),
+            min(max(force, self.GRIPPER_FORCE_MIN), self.GRIPPER_FORCE_MAX),
+        )
 
     def get_gripper_feedback(self) -> tuple[float, float]:
         if not self.config.has_gripper:
@@ -514,15 +538,7 @@ class Nero(Robot):
         self._arm.move_j(target)
         result = [float(value) for value in target]
         if self.config.has_gripper:
-            values = list(action["action"])
-            width = min(
-                max(float(values[-2]), self.GRIPPER_WIDTH_MIN_M),
-                self.GRIPPER_WIDTH_MAX_M,
-            )
-            force = min(
-                max(float(values[-1]), self.GRIPPER_FORCE_MIN),
-                self.GRIPPER_FORCE_MAX,
-            )
+            width, force = self._build_gripper_target(action)
             effector = self._get_gripper_effector()
             if effector is None:
                 raise RuntimeError("Nero gripper effector is unavailable")

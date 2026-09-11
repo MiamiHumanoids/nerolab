@@ -11,10 +11,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from dataset_episode_labels import save_episode_label
+from dataset_episode_labels import save_dataset_display_name, save_episode_label
 from task_trajectory import (
     GRIPPER_REPLAY_FORCE,
     amplify_gripper_samples,
+    command_joint_target_if_changed,
     command_recorded_gripper,
     hold_gripper_grasp_pose,
     is_amplified_gripper_closing,
@@ -24,6 +25,7 @@ from task_trajectory import (
     resample_replay_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
+    trim_trailing_stationary_samples,
     wait_for_gripper_release_pose,
 )
 
@@ -62,6 +64,7 @@ def main(
     dataset_root: Path,
     amplified_gripper: bool = False,
     variation: str | None = None,
+    dataset_name: str | None = None,
 ) -> None:
     print("Preparing NERO replay recorder...", flush=True)
     global cv2, np
@@ -115,6 +118,14 @@ def main(
 
     recording = json.loads(task_file.read_text())
     samples = prepare_task_execution_samples(recording)
+    original_duration = float(samples[-1]["time"])
+    samples = trim_trailing_stationary_samples(samples)
+    trimmed_duration = original_duration - float(samples[-1]["time"])
+    if trimmed_duration > 0.0:
+        print(
+            f"Trimmed {trimmed_duration:.2f}s of redundant stationary task tail.",
+            flush=True,
+        )
     if amplified_gripper:
         samples = amplify_gripper_samples(samples)
     samples = resample_replay_samples(samples, DATASET_FPS)
@@ -147,6 +158,8 @@ def main(
             use_videos=True,
             video_backend="pyav",
         )
+    if dataset_name is not None:
+        save_dataset_display_name(dataset_root, dataset_name)
 
     robot = Nero(NeroConfig(
         id="nero_replay_record",
@@ -176,6 +189,7 @@ def main(
     stop_requested = False
     try:
         previous_gripper: tuple[str, float, float] | None = None
+        previous_target: list[float] | None = None
         previous_grasping = False
         smooth_move_with_recovery(
             robot,
@@ -192,7 +206,11 @@ def main(
                     f"got {mode!r} at frame {index}"
                 )
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
-            robot._arm.move_js(target)
+            previous_target = command_joint_target_if_changed(
+                robot._arm,
+                target,
+                previous_target,
+            )
             if amplified_gripper and is_amplified_gripper_opening(sample, previous_grasping):
                 pause_started = time.monotonic()
                 wait_for_gripper_release_pose(robot, target, "Replay recording")
@@ -239,7 +257,18 @@ def main(
         print("Task complete; ending dataset recording before Safe Bicep reset.")
     finally:
         cv2.destroyAllWindows()
-        safe_bicep_shutdown(robot, "Replay recording shutdown")
+        try:
+            safe_bicep_shutdown(
+                robot,
+                "Replay recording shutdown",
+                engage_brakes=False,
+                brake_on_failure=False,
+            )
+        except RuntimeError as exc:
+            print(
+                f"Replay recording shutdown handed Safe Bicep recovery to Nero Lab: {exc}",
+                flush=True,
+            )
 
     episode_index = dataset.meta.total_episodes
     dataset.save_episode()
@@ -261,6 +290,7 @@ if __name__ == "__main__":
     parser.add_argument("--task-file", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--variation", default=None)
+    parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--amplified-gripper", action="store_true")
     args = parser.parse_args()
     main(
@@ -268,4 +298,5 @@ if __name__ == "__main__":
         args.dataset_root,
         amplified_gripper=args.amplified_gripper,
         variation=args.variation,
+        dataset_name=args.dataset_name,
     )

@@ -10,11 +10,13 @@ from task_trajectory import (
     amplify_gripper_samples,
     append_safe_bicep_return,
     command_recorded_gripper,
+    clamp_replay_targets,
     format_cli_float,
     hold_gripper_grasp_pose,
     interpolated_joint_trajectory,
     is_amplified_gripper_closing,
     is_amplified_gripper_opening,
+    is_powered_safe_bicep_pose,
     is_safe_bicep_pose,
     prepare_gripper_for_replay,
     prepare_replay_samples,
@@ -23,12 +25,50 @@ from task_trajectory import (
     resample_replay_samples,
     safe_bicep_shutdown,
     safe_bicep_recovery_pose,
+    smooth_move_to_target,
     smooth_move_with_recovery,
+    trim_trailing_stationary_samples,
     wait_for_gripper_release_pose,
 )
 
 
 class TaskTrajectoryTest(unittest.TestCase):
+    def test_replay_record_trims_long_stationary_tail_to_one_second(self):
+        samples = [
+            {"time": 0.0, "joints": [0.0] * 7, "gripper": 0.1},
+            {"time": 1.0, "joints": [0.2] + [0.0] * 6, "gripper": 0.1},
+            {"time": 2.0, "joints": [0.2] + [0.0] * 6, "gripper": 0.1},
+            {"time": 3.0, "joints": [0.2] + [0.0] * 6, "gripper": 0.1},
+            {"time": 4.0, "joints": [0.2] + [0.0] * 6, "gripper": 0.1},
+        ]
+
+        trimmed = trim_trailing_stationary_samples(samples)
+
+        self.assertEqual(trimmed, samples[:3])
+
+    def test_execution_clamps_joint_7_inside_powered_motion_limit(self):
+        samples = [
+            {"time": 0.0, "joints": [0.0] * 6 + [1.5], "gripper": 0.1},
+            {"time": 1.0, "joints": [0.0] * 6 + [1.7], "gripper": 0.1},
+        ]
+
+        execution = prepare_task_execution_samples({
+            "joint_space": "follower",
+            "samples": samples,
+        })
+
+        self.assertAlmostEqual(execution[-1]["joints"][6], 1.565797)
+        self.assertEqual(samples[-1]["joints"][6], 1.7)
+
+    def test_replay_target_clamping_preserves_valid_targets(self):
+        sample = {"time": 0.0, "joints": SAFE_BICEP_JOINTS.copy()}
+
+        self.assertEqual(clamp_replay_targets([sample]), [sample])
+
+    def test_powered_safe_bicep_rejects_brake_settled_pose(self):
+        self.assertTrue(is_powered_safe_bicep_pose(SAFE_BICEP_JOINTS))
+        self.assertFalse(is_powered_safe_bicep_pose(SAFE_BICEP_BRAKED_JOINTS))
+
     def test_task_execution_excludes_appended_safe_bicep_shutdown(self):
         task_end = SAFE_BICEP_JOINTS.copy()
         task_end[0] = 0.5
@@ -518,6 +558,114 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("disconnect", False),
         ])
 
+    def test_safe_shutdown_can_leave_arm_enabled_at_safe_bicep(self):
+        events = []
+
+        class Arm:
+            def set_speed_percent(self, speed):
+                events.append(("speed", speed))
+
+        class Robot:
+            _arm = Arm()
+
+            def engage_brakes(self):
+                events.append(("brakes",))
+
+            def disconnect(self, disable_arm=True):
+                events.append(("disconnect", disable_arm))
+
+        with patch(
+            "task_trajectory.prepare_safe_bicep_motion",
+            side_effect=lambda robot, label: events.append(("prepare", label)),
+        ), patch(
+            "task_trajectory.smooth_move_to_target",
+            side_effect=lambda robot, target, label: events.append(
+                ("move", target.copy(), label)
+            ),
+        ):
+            safe_bicep_shutdown(
+                Robot(),
+                "Replay recording shutdown",
+                engage_brakes=False,
+            )
+
+        self.assertEqual(events, [
+            ("speed", 25),
+            ("prepare", "Replay recording shutdown"),
+            ("move", SAFE_BICEP_JOINTS, "Replay recording shutdown"),
+            ("disconnect", False),
+        ])
+
+    def test_enabled_safe_shutdown_brakes_when_safe_bicep_move_fails(self):
+        events = []
+
+        class Arm:
+            def set_speed_percent(self, speed):
+                events.append(("speed", speed))
+
+        class Robot:
+            _arm = Arm()
+
+            def engage_brakes(self):
+                events.append(("brakes",))
+
+            def disconnect(self, disable_arm=True):
+                events.append(("disconnect", disable_arm))
+
+        with (
+            patch(
+                "task_trajectory.smooth_move_with_recovery",
+                side_effect=RuntimeError("reset failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "reset failed"),
+        ):
+            safe_bicep_shutdown(
+                Robot(),
+                "Replay recording shutdown",
+                engage_brakes=False,
+            )
+
+        self.assertEqual(events, [
+            ("speed", 25),
+            ("brakes",),
+            ("disconnect", False),
+        ])
+
+    def test_teach_shutdown_failure_hands_off_without_braking(self):
+        events = []
+
+        class Arm:
+            def set_speed_percent(self, speed):
+                events.append(("speed", speed))
+
+        class Robot:
+            _arm = Arm()
+
+            def engage_brakes(self):
+                events.append(("brakes",))
+
+            def disconnect(self, disable_arm=True):
+                events.append(("disconnect", disable_arm))
+
+        with (
+            patch(
+                "task_trajectory.smooth_move_with_recovery",
+                side_effect=RuntimeError("reset failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "reset failed"),
+        ):
+            safe_bicep_shutdown(
+                Robot(),
+                "Teach shutdown",
+                engage_brakes=False,
+                brake_on_failure=False,
+            )
+
+        self.assertEqual(events, [
+            ("speed", 25),
+            ("disconnect", False),
+        ])
+
     def test_safe_shutdown_disconnects_when_brake_confirmation_fails(self):
         events = []
 
@@ -644,6 +792,32 @@ class TaskTrajectoryTest(unittest.TestCase):
             ("prepare", "Task replay"),
             ("move", target, "Task replay"),
         ])
+
+    def test_smooth_move_streams_changing_waypoints_with_move_js(self):
+        target = [0.1] * 7
+
+        class Arm:
+            def __init__(self):
+                self.targets = []
+
+            def move_js(self, waypoint):
+                self.targets.append(waypoint)
+
+        class Robot:
+            def __init__(self):
+                self._arm = Arm()
+                self.reads = 0
+
+            def get_joint_angles(self):
+                self.reads += 1
+                return [0.0] * 7 if self.reads == 1 else target
+
+        robot = Robot()
+        with patch("task_trajectory.time.sleep"):
+            smooth_move_to_target(robot, target, "Test stream")
+
+        self.assertGreater(len(robot._arm.targets), 1)
+        self.assertEqual(robot._arm.targets[-1], target)
 
 
 if __name__ == "__main__":

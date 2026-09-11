@@ -117,7 +117,18 @@ def main(task_file: Path, amplified_gripper: bool = False) -> None:
             f"target={final_target} current={final_joints}."
         )
     finally:
-        safe_bicep_shutdown(robot, "Replay shutdown")
+        try:
+            safe_bicep_shutdown(
+                robot,
+                "Replay shutdown",
+                engage_brakes=False,
+                brake_on_failure=False,
+            )
+        except RuntimeError as exc:
+            print(
+                f"Replay shutdown handed Safe Bicep recovery to Nero Lab: {exc}",
+                flush=True,
+            )
     print("Task replay complete; no dataset was recorded.")
 
 

@@ -128,6 +128,26 @@ def test_joint_key_mapping_and_action_conversion():
     assert target[-1] == 0.7
 
 
+def test_lerobot_dataset_action_names_drive_joints_and_gripper():
+    cfg = NeroConfig(id="test-arm", can_channel="can0")
+    robot = Nero(cfg)
+    arm = MagicMock()
+    arm.is_connected.return_value = True
+    effector = MagicMock()
+    robot._arm = arm
+    robot._gripper_effector = effector
+    action = {
+        **{f"Joint_{index}": index / 10 for index in range(1, 8)},
+        "Gripper": 0.04,
+    }
+
+    result = robot.send_action(action)
+
+    arm.move_j.assert_called_once_with([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+    effector.move_gripper_m.assert_called_once_with(value=0.04, force=3.0)
+    assert result == {"action": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.04, 3.0]}
+
+
 def test_joint_normalization_handles_list_and_dict():
     cfg = NeroConfig(id="test-arm", can_channel="can0")
     robot = Nero(cfg)

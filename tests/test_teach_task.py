@@ -4,12 +4,41 @@ from unittest.mock import Mock, patch
 import pytest
 
 from teach_task import (
+    capture_initial_table_setup,
     enter_gravity_compensation,
     follower_hold_target,
     play_recording_start_beep,
     show_recording_stopped_countdown,
     wait_for_gravity_compensation,
 )
+
+
+def test_initial_table_setup_capture_writes_image_and_metadata(tmp_path):
+    frame = __import__("numpy").zeros((480, 640, 3), dtype="uint8")
+    camera = SimpleNamespace(
+        is_connected=True,
+        device_index=2,
+        capture_frame=Mock(return_value=frame),
+    )
+    robot = SimpleNamespace(_overview_camera=camera)
+    output = tmp_path / "stack-red.json"
+
+    with patch("teach_task.cv2.imwrite", return_value=True) as write_image:
+        metadata = capture_initial_table_setup(robot, output)
+
+    assert metadata is not None
+    assert metadata["path"] == "setup_images/stack-red__initial-table.jpg"
+    assert metadata["camera"] == "overview_webcam"
+    assert metadata["device_index"] == 2
+    assert metadata["width"] == 640
+    assert metadata["height"] == 480
+    write_image.assert_called_once()
+
+
+def test_initial_table_setup_capture_is_nonfatal_without_webcam(tmp_path):
+    robot = SimpleNamespace(_overview_camera=None)
+
+    assert capture_initial_table_setup(robot, tmp_path / "task.json") is None
 
 
 class FakeTeachArm:
