@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 import math
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -22,22 +23,32 @@ FPS = 50
 GRIPPER_CONFIG_TIMEOUT_S = 0.25
 DEFAULT_TASK_DIR = Path.home() / "Nero" / "tasks"
 TEACH_SHUTDOWN_COUNTDOWN_S = 3
+TEACH_SHUTDOWN_MOTION_SPEED_RAD_S = 0.4
+
+
+def teaching_stop_requested(stop_signal: Path | None) -> bool:
+    return stop_signal is not None and stop_signal.exists()
 
 
 def capture_initial_table_setup(robot, output: Path) -> dict[str, object] | None:
+    started_at = time.monotonic()
     camera = getattr(robot, "_overview_camera", None)
     if camera is None:
         print("Initial table setup image unavailable: no overview webcam configured.", flush=True)
         return None
     try:
-        if not camera.is_connected:
-            camera.connect()
-        frame = None
-        for _ in range(5):
-            frame = camera.capture_frame()
-            if frame is not None:
-                break
-            time.sleep(0.05)
+        high_resolution_capture = getattr(
+            camera, "capture_highest_resolution_frame", None
+        )
+        frame = high_resolution_capture() if high_resolution_capture is not None else None
+        if frame is None:
+            if not camera.is_connected:
+                camera.connect()
+            for _ in range(5):
+                frame = camera.capture_frame()
+                if frame is not None:
+                    break
+                time.sleep(0.05)
         if frame is None:
             raise RuntimeError("overview webcam returned no frame")
         rgb = np.asarray(frame)
@@ -56,7 +67,11 @@ def capture_initial_table_setup(robot, output: Path) -> dict[str, object] | None
             "width": int(rgb.shape[1]),
             "height": int(rgb.shape[0]),
         }
-        print(f"Captured initial table setup: {image_path}", flush=True)
+        print(
+            f"Captured initial table setup in {time.monotonic() - started_at:.2f}s: "
+            f"{image_path} ({rgb.shape[1]}x{rgb.shape[0]})",
+            flush=True,
+        )
         return metadata
     except Exception as exc:
         print(f"Initial table setup image unavailable: {exc}", flush=True)
@@ -282,6 +297,7 @@ def main(
     output: Path,
     follower_anchor: list[float],
     variation: str = "",
+    stop_signal: Path | None = None,
 ) -> None:
     robot = Nero(NeroConfig(
         id="nero_teach",
@@ -293,8 +309,23 @@ def main(
         has_overview_camera=True,
         reset_on_connect=False,
     ))
+    startup_started_at = time.monotonic()
+    setup_capture: dict[str, dict[str, object] | None] = {"metadata": None}
+
+    def capture_setup() -> None:
+        setup_capture["metadata"] = capture_initial_table_setup(robot, output)
+
+    setup_capture_thread = threading.Thread(
+        target=capture_setup,
+        name="nero-teach-layout-photo",
+        daemon=True,
+    )
+    setup_capture_thread.start()
     robot.connect(calibrate=False)
-    initial_table_setup = capture_initial_table_setup(robot, output)
+    print(
+        f"Teach arm connected in {time.monotonic() - startup_started_at:.2f}s.",
+        flush=True,
+    )
     effector = robot._get_gripper_effector()
     if effector is None:
         raise RuntimeError("NERO gripper effector is unavailable")
@@ -314,7 +345,6 @@ def main(
     channel_states = {
         source: state for source, (state, _, _) in initial_channels.items()
     }
-    _, gripper_timestamp = read_gripper_state(effector, last_gripper)
     cv2.namedWindow("NERO teach task", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("NERO teach task", 900, 180)
     print("Entering gravity-compensated Teach mode...", flush=True)
@@ -324,6 +354,12 @@ def main(
     teach_mode_active = False
     try:
         recording_anchor = enter_gravity_compensation(robot)
+        setup_capture_thread.join()
+        initial_table_setup = setup_capture["metadata"]
+        print(
+            f"Teach mode ready in {time.monotonic() - startup_started_at:.2f}s total.",
+            flush=True,
+        )
         anchor_shift = [
             actual - requested
             for actual, requested in zip(recording_anchor, follower_anchor)
@@ -335,7 +371,7 @@ def main(
         )
         teach_mode_active = True
         print(f"Teach mode active. Move the robot manually; samples are recorded at {FPS} FPS.")
-        print("Press Spacebar in the teach window to save the task.")
+        print("Press Spacebar in Nero Lab or the teach window to save the task.")
         if hasattr(effector, "set_gripper_teaching_pendant_param"):
             configured = effector.set_gripper_teaching_pendant_param(
                 teaching_range_per=100,
@@ -348,10 +384,12 @@ def main(
                 f"{'configured' if configured else 'not acknowledged'}.",
                 flush=True,
             )
-        last_gripper = wait_for_fresh_gripper_feedback(
-            effector, gripper_timestamp
-        )
+        last_gripper, _ = read_gripper_state(effector, last_gripper)
         play_recording_start_beep()
+        print(
+            f"Teach recording started in {time.monotonic() - startup_started_at:.2f}s total.",
+            flush=True,
+        )
         next_sample = time.monotonic()
         while True:
             now = time.monotonic()
@@ -400,10 +438,10 @@ def main(
             canvas = np.zeros((180, 900, 3), dtype=np.uint8)
             cv2.putText(canvas, "TEACH MODE - move the robot manually", (24, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(canvas, f"Samples: {len(sequence)}    Gripper: {last_gripper[1]:.3f} {last_gripper[0]}", (24, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 220, 255), 1, cv2.LINE_AA)
-            cv2.putText(canvas, "Backdrive arm and gripper    Spacebar: save", (24, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 220, 255), 1, cv2.LINE_AA)
+            cv2.putText(canvas, "Backdrive arm and gripper    Spacebar in either window: save", (24, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 220, 255), 1, cv2.LINE_AA)
             cv2.imshow("NERO teach task", canvas)
             key = cv2.waitKey(1) & 0xFF
-            if key == ord(" "):
+            if key == ord(" ") or teaching_stop_requested(stop_signal):
                 print(
                     "Recording stopped; release robot and step away. "
                     f"Returning to Safe Bicep in {TEACH_SHUTDOWN_COUNTDOWN_S} seconds.",
@@ -439,6 +477,10 @@ def main(
             "Teach shutdown",
             engage_brakes=False,
             brake_on_failure=False,
+            recovery_attempts=4,
+            speed_percent=100,
+            motion_speed_rad_s=TEACH_SHUTDOWN_MOTION_SPEED_RAD_S,
+            use_planned_move=True,
         )
         raise RuntimeError("Teach task was too short; record at least two samples.")
     start_time = float(sequence[0]["time"])
@@ -474,6 +516,10 @@ def main(
             "Teach shutdown",
             engage_brakes=False,
             brake_on_failure=False,
+            recovery_attempts=4,
+            speed_percent=100,
+            motion_speed_rad_s=TEACH_SHUTDOWN_MOTION_SPEED_RAD_S,
+            use_planned_move=True,
         )
         return
     sequence = append_safe_bicep_return(sequence)
@@ -495,6 +541,10 @@ def main(
             "Teach shutdown",
             engage_brakes=False,
             brake_on_failure=False,
+            recovery_attempts=4,
+            speed_percent=100,
+            motion_speed_rad_s=TEACH_SHUTDOWN_MOTION_SPEED_RAD_S,
+            use_planned_move=True,
         )
     except RuntimeError as exc:
         print(
@@ -509,9 +559,16 @@ if __name__ == "__main__":
     parser.add_argument("--variation", default="")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--follower-anchor", type=float, nargs=7, required=True)
+    parser.add_argument("--stop-signal", type=Path)
     args = parser.parse_args()
     try:
-        main(args.task, args.output, args.follower_anchor, args.variation)
+        main(
+            args.task,
+            args.output,
+            args.follower_anchor,
+            args.variation,
+            args.stop_signal,
+        )
     except RuntimeError as exc:
         print(f"Teach task unavailable: {exc}", flush=True)
         if "Teach mode did not enter gravity compensation" in str(exc):

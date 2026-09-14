@@ -15,7 +15,6 @@ from dataset_episode_labels import save_dataset_display_name, save_episode_label
 from task_trajectory import (
     GRIPPER_REPLAY_FORCE,
     amplify_gripper_samples,
-    command_joint_target_if_changed,
     command_recorded_gripper,
     hold_gripper_grasp_pose,
     is_amplified_gripper_closing,
@@ -25,11 +24,13 @@ from task_trajectory import (
     resample_replay_samples,
     safe_bicep_shutdown,
     smooth_move_with_recovery,
+    stream_recorded_trajectory,
     trim_trailing_stationary_samples,
     wait_for_gripper_release_pose,
 )
 
 REPLAY_SPEED_PERCENT = 25
+TRAJECTORY_SPEED_PERCENT = 100
 DATASET_FPS = 30
 
 REPO_ID = "adrian/nero_replayed"
@@ -44,6 +45,19 @@ FEATURES = {
     "observation.images.overview": {"dtype": "video", "shape": (3, 480, 640), "names": ["channel", "height", "width"]},
     "observation.depth": {"dtype": "float32", "shape": (480, 640), "names": None},
 }
+
+
+class ReplayRecordingInterrupted(Exception):
+    pass
+
+
+def recording_key_action(key_code: int) -> str | None:
+    key = key_code & 0xFF
+    if key in (27, ord("a"), ord("A")):
+        return "abort"
+    if key in (ord("q"), ord("Q")):
+        return "stop"
+    return None
 
 
 def rgb_image(value: object, label: str) -> Any:
@@ -187,17 +201,30 @@ def main(
     print("Streaming recorded joint targets on their original timeline.")
 
     stop_requested = False
+    abort_requested = False
     try:
         previous_gripper: tuple[str, float, float] | None = None
-        previous_target: list[float] | None = None
         previous_grasping = False
         smooth_move_with_recovery(
             robot,
             [float(value) for value in samples[0]["joints"]],
             "Replay recording",
         )
-        replay_started = time.monotonic()
-        for index, sample in enumerate(samples):
+        robot._arm.set_speed_percent(TRAJECTORY_SPEED_PERCENT)
+        print(
+            f"Recorded trajectory speed set to {TRAJECTORY_SPEED_PERCENT}%.",
+            flush=True,
+        )
+        primed_observation = robot.get_observation()
+        print(
+            "Replay recording: cameras primed; starting Replay Task move_js timeline.",
+            flush=True,
+        )
+
+        def record_sample(sample: dict[str, Any], index: int) -> float:
+            nonlocal previous_gripper, previous_grasping
+            nonlocal primed_observation, stop_requested, abort_requested
+            timeline_pause = 0.0
             target = [float(value) for value in sample["joints"]]
             mode = str(sample.get("gripper_mode", "width"))
             if mode != "width":
@@ -206,24 +233,22 @@ def main(
                     f"got {mode!r} at frame {index}"
                 )
             gripper = float(np.clip(float(sample.get("gripper", 0.1)), 0.0, 0.1))
-            previous_target = command_joint_target_if_changed(
-                robot._arm,
-                target,
-                previous_target,
-            )
             if amplified_gripper and is_amplified_gripper_opening(sample, previous_grasping):
                 pause_started = time.monotonic()
                 wait_for_gripper_release_pose(robot, target, "Replay recording")
-                replay_started += time.monotonic() - pause_started
+                timeline_pause += time.monotonic() - pause_started
             previous_gripper = command_recorded_gripper(effector, sample, previous_gripper)
             if amplified_gripper and is_amplified_gripper_closing(
                 sample, previous_grasping
             ):
                 pause_started = time.monotonic()
                 hold_gripper_grasp_pose(robot, target, "Replay recording")
-                replay_started += time.monotonic() - pause_started
+                timeline_pause += time.monotonic() - pause_started
             previous_grasping = bool(sample.get("gripper_grasping", False))
-            obs = robot.get_observation()
+            obs = primed_observation
+            primed_observation = None
+            if obs is None:
+                obs = robot.get_observation()
             state = np.asarray(obs["observation.state"][:8], dtype=np.float32)
             wrist = rgb_image(obs.get("observation.images.wrist"), "wrist")
             overview = rgb_image(obs.get("observation.images.overview"), "overview")
@@ -241,20 +266,50 @@ def main(
                 "observation.depth": depth,
                 "task": task,
             })
+            if index == 0 or (index + 1) % DATASET_FPS == 0:
+                tracking_error = max(
+                    abs(float(value) - goal)
+                    for value, goal in zip(state[:7], target)
+                )
+                print(
+                    f"Replay recording frame {index + 1}/{len(samples)}; "
+                    f"tracking_error={tracking_error:.6f} rad.",
+                    flush=True,
+                )
             combined = np.hstack([
                 cv2.cvtColor(wrist, cv2.COLOR_RGB2BGR),
                 cv2.cvtColor(overview, cv2.COLOR_RGB2BGR),
             ])
-            cv2.putText(combined, f"Replay recording {index + 1}/{len(samples)}  q: stop", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(combined, f"Replay recording {index + 1}/{len(samples)}  q: stop/save  a/esc: abort", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
             cv2.imshow("NERO replay recording", combined)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            key_action = recording_key_action(cv2.waitKey(1))
+            if key_action == "abort":
+                abort_requested = True
+                print(
+                    f"Replay recording aborted by a at frame "
+                    f"{index + 1}/{len(samples)} "
+                    f"(task time {float(sample['time']):.2f}s); "
+                    "episode will be discarded.",
+                    flush=True,
+                )
+                raise ReplayRecordingInterrupted
+            if key_action == "stop":
                 stop_requested = True
-                break
-            next_time = float(samples[index + 1]["time"]) if index + 1 < len(samples) else float(sample["time"]) + 1.0 / DATASET_FPS
-            deadline = replay_started + next_time
-            while time.monotonic() < deadline:
-                time.sleep(0.005)
-        print("Task complete; ending dataset recording before Safe Bicep reset.")
+                print(
+                    f"Replay recording stopped by q at frame "
+                    f"{index + 1}/{len(samples)} "
+                    f"(task time {float(sample['time']):.2f}s).",
+                    flush=True,
+                )
+                raise ReplayRecordingInterrupted
+            return timeline_pause
+
+        try:
+            stream_recorded_trajectory(robot, samples, record_sample)
+        except ReplayRecordingInterrupted:
+            pass
+        if not stop_requested and not abort_requested:
+            print("Task complete; ending dataset recording before Safe Bicep reset.")
     finally:
         cv2.destroyAllWindows()
         try:
@@ -263,12 +318,19 @@ def main(
                 "Replay recording shutdown",
                 engage_brakes=False,
                 brake_on_failure=False,
+                speed_percent=100,
+                motion_speed_rad_s=0.4,
             )
         except RuntimeError as exc:
             print(
                 f"Replay recording shutdown handed Safe Bicep recovery to Nero Lab: {exc}",
                 flush=True,
             )
+
+    if abort_requested:
+        dataset.clear_episode_buffer()
+        print("Replay recording aborted; no dataset episode was created.", flush=True)
+        return
 
     episode_index = dataset.meta.total_episodes
     dataset.save_episode()

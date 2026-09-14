@@ -171,6 +171,8 @@ class IntelRealSenseD405:
 class OpenCVWebcam:
     """OpenCV webcam wrapper for a fixed overview camera."""
 
+    STILL_RESOLUTION = (2560, 1440)
+
     def __init__(
         self,
         device_index: int = 0,
@@ -230,3 +232,30 @@ class OpenCVWebcam:
             converted = cv2.resize(converted, (self.width, self.height))
         self._last_frame = converted
         return self._last_frame
+
+    def capture_highest_resolution_frame(self) -> Any | None:
+        import cv2
+
+        was_connected = self.is_connected
+        if was_connected:
+            self.disconnect()
+        backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+        capture = cv2.VideoCapture(self.device_index, backend)
+        best_frame = None
+        try:
+            if not capture.isOpened():
+                return None
+            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.STILL_RESOLUTION[0])
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.STILL_RESOLUTION[1])
+            success, frame = capture.read()
+            if success and frame is not None:
+                best_frame = frame.copy()
+        finally:
+            capture.release()
+            if was_connected:
+                self.connect()
+        if best_frame is None:
+            return None
+        return cv2.cvtColor(best_frame, cv2.COLOR_BGR2RGB)

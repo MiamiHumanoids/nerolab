@@ -4,13 +4,19 @@ from unittest.mock import Mock, patch
 import pytest
 
 from teach_task import (
+    TEACH_SHUTDOWN_MOTION_SPEED_RAD_S,
     capture_initial_table_setup,
     enter_gravity_compensation,
     follower_hold_target,
     play_recording_start_beep,
     show_recording_stopped_countdown,
+    teaching_stop_requested,
     wait_for_gravity_compensation,
 )
+
+
+def test_teach_shutdown_uses_fast_motion_profile():
+    assert TEACH_SHUTDOWN_MOTION_SPEED_RAD_S == 0.4
 
 
 def test_initial_table_setup_capture_writes_image_and_metadata(tmp_path):
@@ -35,10 +41,57 @@ def test_initial_table_setup_capture_writes_image_and_metadata(tmp_path):
     write_image.assert_called_once()
 
 
+def test_initial_table_setup_prefers_high_resolution_still(tmp_path):
+    low_resolution = __import__("numpy").zeros((480, 640, 3), dtype="uint8")
+    high_resolution = __import__("numpy").zeros((2160, 3840, 3), dtype="uint8")
+    camera = SimpleNamespace(
+        is_connected=True,
+        device_index=2,
+        capture_highest_resolution_frame=Mock(return_value=high_resolution),
+        capture_frame=Mock(return_value=low_resolution),
+    )
+    robot = SimpleNamespace(_overview_camera=camera)
+
+    with patch("teach_task.cv2.imwrite", return_value=True):
+        metadata = capture_initial_table_setup(robot, tmp_path / "task.json")
+
+    assert metadata is not None
+    assert metadata["width"] == 3840
+    assert metadata["height"] == 2160
+    camera.capture_highest_resolution_frame.assert_called_once_with()
+    camera.capture_frame.assert_not_called()
+
+
+def test_high_resolution_setup_skips_normal_stream_connection(tmp_path):
+    high_resolution = __import__("numpy").zeros((2160, 3840, 3), dtype="uint8")
+    camera = SimpleNamespace(
+        is_connected=False,
+        device_index=2,
+        connect=Mock(),
+        capture_highest_resolution_frame=Mock(return_value=high_resolution),
+        capture_frame=Mock(),
+    )
+    robot = SimpleNamespace(_overview_camera=camera)
+
+    with patch("teach_task.cv2.imwrite", return_value=True):
+        capture_initial_table_setup(robot, tmp_path / "task.json")
+
+    camera.connect.assert_not_called()
+    camera.capture_frame.assert_not_called()
+
+
 def test_initial_table_setup_capture_is_nonfatal_without_webcam(tmp_path):
     robot = SimpleNamespace(_overview_camera=None)
 
     assert capture_initial_table_setup(robot, tmp_path / "task.json") is None
+
+
+def test_teaching_stop_signal_is_detected(tmp_path):
+    stop_signal = tmp_path / "teach.stop"
+
+    assert not teaching_stop_requested(stop_signal)
+    stop_signal.touch()
+    assert teaching_stop_requested(stop_signal)
 
 
 class FakeTeachArm:

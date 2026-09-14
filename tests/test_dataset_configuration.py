@@ -9,12 +9,15 @@ from lerobot_dataset_viz_pyav import NERO_SCALAR_NAMES, install_named_scalar_log
 from replay_record_task import (
     FEATURES as REPLAY_FEATURES,
     GRIPPER_REPLAY_FORCE as RECORDER_GRIPPER_REPLAY_FORCE,
+    TRAJECTORY_SPEED_PERCENT,
+    recording_key_action,
 )
 from task_trajectory import GRIPPER_REPLAY_FORCE
 
 
 def test_recorders_declare_camera_features_as_video():
     assert RECORDER_GRIPPER_REPLAY_FORCE == GRIPPER_REPLAY_FORCE
+    assert TRAJECTORY_SPEED_PERCENT == 100
     expected_video_keys = {
         "observation.images.wrist",
         "observation.images.overview",
@@ -51,7 +54,6 @@ def test_recorders_declare_camera_features_as_video():
             assert dataset._video_backend == "pyav"
             assert dataset.writer.episode_buffer["episode_index"] == 0
             assert get_feature_names(dataset, "action") == expected_names
-
             resumed = LeRobotDataset.resume(
                 repo_id="local/nero-schema-test",
                 root=Path(temp_dir) / "dataset",
@@ -59,6 +61,15 @@ def test_recorders_declare_camera_features_as_video():
             )
             assert resumed.writer.episode_buffer["episode_index"] == 0
             assert resumed._video_backend == "pyav"
+
+
+def test_replay_record_key_actions_distinguish_save_and_abort():
+    assert recording_key_action(27) == "abort"
+    assert recording_key_action(ord("a")) == "abort"
+    assert recording_key_action(ord("A")) == "abort"
+    assert recording_key_action(ord("q")) == "stop"
+    assert recording_key_action(ord("Q")) == "stop"
+    assert recording_key_action(-1) is None
 
 
 def test_rerun_wrapper_splits_action_batch_into_named_series():

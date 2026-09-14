@@ -78,5 +78,37 @@ class TestImageAcquisition(unittest.TestCase):
         self.assertTrue(camera.is_connected)
         self.assertEqual(captured, "rgb-frame")
 
+    def test_overview_still_uses_largest_negotiated_native_frame(self):
+        import numpy as np
+
+        capture = MagicMock()
+        capture.isOpened.return_value = True
+        large = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        capture.read.return_value = (True, large)
+        cv2 = MagicMock(
+            CAP_DSHOW=700,
+            CAP_ANY=0,
+            CAP_PROP_FOURCC=6,
+            CAP_PROP_FRAME_WIDTH=3,
+            CAP_PROP_FRAME_HEIGHT=4,
+            CAP_PROP_BUFFERSIZE=38,
+            COLOR_BGR2RGB=4,
+        )
+        cv2.VideoCapture.return_value = capture
+        cv2.VideoWriter_fourcc.return_value = 1196444237
+        cv2.cvtColor.side_effect = lambda frame, _conversion: frame
+        camera = OpenCVWebcam(device_index=2)
+
+        with patch.dict("sys.modules", {"cv2": cv2}), patch(
+            "lerobot_robot_nero.camera.os.name", "nt"
+        ):
+            frame = camera.capture_highest_resolution_frame()
+
+        self.assertEqual(frame.shape, (1080, 1920, 3))
+        capture.read.assert_called_once_with()
+        capture.set.assert_any_call(cv2.CAP_PROP_FRAME_WIDTH, 2560)
+        capture.set.assert_any_call(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
+        capture.release.assert_called_once_with()
+
 if __name__ == "__main__":
     unittest.main()

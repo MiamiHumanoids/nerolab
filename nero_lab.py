@@ -13,7 +13,9 @@ import threading
 import time
 import tkinter as tk
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import re
 from tkinter import filedialog, messagebox, ttk
@@ -33,17 +35,21 @@ if TYPE_CHECKING:
     from lerobot_robot_nero import Nero, NeroConfig
     from lerobot_robot_nero.azure_storage import AzureNeroStorage
 
-APP_BUILD = "2026-09-11-rollback-motion-117"
+APP_BUILD = "2026-09-11-teach-planned-recovery-148"
 APP_DISPLAY_NAME = "Nero Lab"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
 UPRIGHT_RESET_JOINTS = [0.0] * 7
 SAFE_BICEP_RESET_JOINTS = SAFE_BICEP_JOINTS.copy()
-RESET_SPEED_PERCENT = 25
+RESET_SPEED_PERCENT = 100
+UPRIGHT_RESET_SPEED_PERCENT = 100
 SLIDER_DEBOUNCE_MS = 100
 RESET_STREAM_INTERVAL_S = 0.02
-RESET_STREAM_SPEED_RAD_S = 0.4
+RESET_STREAM_DURATION_S = 4.0
+UPRIGHT_RESET_DURATION_S = 2.0
+RESET_SETTLE_TIMEOUT_S = 12.0
 RESET_LIMIT_MARGIN = 0.005
+RESET_MAX_WAYPOINT_AHEAD_RAD = 0.05
 COMMAND_JOINT_LIMITS = [
     (-2.705261, 2.705261),
     (-1.74533, 1.74533),
@@ -115,6 +121,13 @@ def is_lerobot_replay_start_pose(values: list[float]) -> bool:
         values,
         target_tolerance=LEROBOT_REPLAY_SAFE_TOLERANCE_RAD,
     )
+
+
+def timestamp_activity_entry(message: str, timestamp: datetime | None = None) -> str:
+    captured_at = timestamp or datetime.now().astimezone()
+    prefix = f"[{captured_at.isoformat(timespec='milliseconds')}] "
+    lines = message.rstrip().splitlines() or [""]
+    return "".join(f"{prefix}{line}\n" for line in lines)
 
 
 def task_layout_image_path(task_file: Path, recording: dict[str, object]) -> Path | None:
@@ -323,6 +336,8 @@ class NeroLab(tk.Tk):
         )
         self.minsize(1300, 850)
         self.process: subprocess.Popen[str] | None = None
+        self.active_process_label: str | None = None
+        self.teach_stop_signal: Path | None = None
         self.azure_storage: AzureNeroStorage | None = None
         self.azure_sync_targets: dict[str, tuple[Path, str]] = {}
         self.robot: Nero | None = None
@@ -331,6 +346,8 @@ class NeroLab(tk.Tk):
         self.windows_can_start_pending = False
         self.can_check_pending = False
         self.activity_trace: list[str] = []
+        self.arm_motion_in_progress = False
+        self.arm_motion_cancel_requested = False
         self.safe_bicep_position_reached = False
         self.slider_motion_job: str | None = None
         self.gripper_motion_job: str | None = None
@@ -374,6 +391,7 @@ class NeroLab(tk.Tk):
         self.status_var = tk.StringVar(value="Ready")
         self.protocol("WM_DELETE_WINDOW", self.close_application)
         self._build_ui()
+        self.bind_all("<KeyPress-space>", self._handle_spacebar)
         self.log_message(
             f"{APP_DISPLAY_NAME} build {APP_BUILD} running from {Path(__file__).resolve()}"
         )
@@ -423,6 +441,12 @@ class NeroLab(tk.Tk):
             self.after(300, self.attributes, "-topmost", False)
 
     def close_application(self) -> None:
+        if getattr(self, "arm_motion_in_progress", False):
+            messagebox.showwarning(
+                "Arm motion in progress",
+                "Wait for the current arm motion to finish or use Emergency Brake.",
+            )
+            return
         robot = self.robot
         try:
             if robot is not None and robot.is_connected:
@@ -649,6 +673,11 @@ class NeroLab(tk.Tk):
         ttk.Button(connection, text="Read joint angles", command=self.read_joint_angles).pack(side="left")
         ttk.Button(connection, text="Check arm status", command=self.check_arm_status).pack(side="left", padx=8)
         ttk.Button(connection, text="Re-enable Arm", command=self.reenable_arm).pack(side="left", padx=8)
+        ttk.Button(
+            connection,
+            text="Clear Emergency Stop",
+            command=self.clear_emergency_stop,
+        ).pack(side="left")
         ttk.Button(connection, text="Upright Reset", command=self.upright_reset).pack(side="right")
         self.arm_status_label = ttk.Label(parent, textvariable=self.arm_status_var, foreground="#555555")
         self.arm_status_label.pack(anchor="w", pady=(8, 0))
@@ -789,9 +818,14 @@ class NeroLab(tk.Tk):
             return
         self.robot = robot
         self.set_joint_slider_values(current_joints)
-        for enable_var, disable_var in zip(self.joint_enable_vars, self.joint_disable_vars):
-            enable_var.set(True)
-            disable_var.set(False)
+        enabled_joints = robot._arm.get_joints_enable_status_list()
+        for enable_var, disable_var, enabled in zip(
+            self.joint_enable_vars,
+            self.joint_disable_vars,
+            enabled_joints,
+        ):
+            enable_var.set(bool(enabled))
+            disable_var.set(not bool(enabled))
         self.safe_bicep_position_reached = self.is_safe_bicep_position(current_joints)
         status = self.robot.get_arm_status()
         status_text = str(getattr(status, "msg", status))
@@ -816,10 +850,10 @@ class NeroLab(tk.Tk):
             self.log_message(
                 f"Arm connected with restricted controls: {teach_recovery_error}"
             )
-        elif "EMERGENCY_STOP" in status_text or "EMERGENCY STOP" in status_text:
+        elif not all(enabled_joints) or "STANDBY" in status_text or "BRAKE_NOT_RELEASED" in status_text:
             self.set_arm_status_display(
-                "Arm status: EMERGENCY STOP | Click Re-enable Arm to release motor brakes",
-                color="#008000",
+                "Arm status: connected, motion disabled | Reset or Re-enable Arm will restore control",
+                color="#8a5a00",
             )
         else:
             self.set_arm_status_display("Arm status: connected")
@@ -1152,7 +1186,13 @@ class NeroLab(tk.Tk):
     def is_safe_bicep_position(self, values: list[float], tolerance: float = 0.1) -> bool:
         return is_safe_bicep_pose(values, target_tolerance=tolerance)
 
-    def require_robot(self) -> Nero | None:
+    def require_robot(self, allow_during_motion: bool = False) -> Nero | None:
+        if getattr(self, "arm_motion_in_progress", False) and not allow_during_motion:
+            messagebox.showwarning(
+                "Arm motion in progress",
+                "Wait for the current arm motion to finish.",
+            )
+            return None
         if self.robot is None or not self.robot.is_connected:
             messagebox.showwarning("Arm not connected", "Connect the arm first.")
             return None
@@ -1342,10 +1382,14 @@ class NeroLab(tk.Tk):
             robot, robot._arm.OPTIONS.MOTION_MODE.J, "MOVE_J", f"{label} joint control"
         )
 
-    def move_joint_path(self, robot: Nero, target: list[float], label: str) -> None:
+    def move_joint_path(
+        self,
+        robot: Nero,
+        target: list[float],
+        label: str,
+        duration: float = RESET_STREAM_DURATION_S,
+    ) -> None:
         start = [float(value) for value in robot.get_joint_angles()]
-        largest_delta = max(abs(goal - value) for value, goal in zip(start, target))
-        duration = max(0.75, largest_delta / RESET_STREAM_SPEED_RAD_S)
         step_count = max(1, int(duration / RESET_STREAM_INTERVAL_S) + 1)
         motion_command = getattr(robot._arm, "move_js", None)
         if motion_command is None:
@@ -1356,28 +1400,42 @@ class NeroLab(tk.Tk):
         )
         stream_started = time.monotonic()
         for step_index in range(1, step_count + 1):
+            if getattr(self, "arm_motion_cancel_requested", False):
+                raise RuntimeError(f"{label} cancelled by Emergency Brake")
             progress = step_index / step_count
             fraction = progress * progress * (3.0 - 2.0 * progress)
             raw_waypoint = [
                 value + (goal - value) * fraction
                 for value, goal in zip(start, target)
             ]
+            measured = [float(value) for value in robot.get_joint_angles()]
+            following_waypoint = [
+                min(max(value, current - RESET_MAX_WAYPOINT_AHEAD_RAD), current + RESET_MAX_WAYPOINT_AHEAD_RAD)
+                for value, current in zip(raw_waypoint, measured)
+            ]
             waypoint = [
                 min(max(value, lower + RESET_LIMIT_MARGIN), upper - RESET_LIMIT_MARGIN)
-                for value, (lower, upper) in zip(raw_waypoint, COMMAND_JOINT_LIMITS)
+                for value, (lower, upper) in zip(following_waypoint, COMMAND_JOINT_LIMITS)
             ]
             motion_command(waypoint)
             next_step_at = stream_started + step_index * duration / step_count
             remaining = next_step_at - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
-        self.wait_for_joint_target(robot, target, label)
+        self.wait_for_joint_target(
+            robot,
+            target,
+            label,
+            timeout=RESET_SETTLE_TIMEOUT_S,
+            motion_command=motion_command,
+        )
 
     def emergency_brake(self) -> None:
-        robot = self.require_robot()
+        robot = self.require_robot(allow_during_motion=True)
         if robot is None:
             return
         try:
+            self.arm_motion_cancel_requested = True
             robot.engage_brakes()
             self.set_arm_status_display("Arm status: EMERGENCY STOP | Click Re-enable Arm to release motor brakes", color="#008000")
             self.log_message("Emergency brake activated; resting pose settled")
@@ -1438,6 +1496,86 @@ class NeroLab(tk.Tk):
         except Exception as exc:
             self.set_arm_status_display(f"Re-enable error: {exc}")
             self.log_message(f"Arm re-enable failed: {exc}")
+
+    def clear_emergency_stop(self) -> None:
+        robot = self.require_robot()
+        if robot is None:
+            return
+        self.cancel_slider_motion()
+        self.arm_motion_in_progress = True
+        self.arm_motion_cancel_requested = False
+        self.safe_bicep_position_reached = False
+        self.set_arm_status_display("Arm status: clearing emergency stop")
+        threading.Thread(
+            target=self._run_clear_emergency_stop,
+            args=(robot,),
+            name="nero-clear-emergency-stop",
+            daemon=True,
+        ).start()
+
+    def _run_clear_emergency_stop(self, robot: Nero) -> None:
+        error: Exception | None = None
+        try:
+            from pyAgxArm.protocols.can_protocol.msgs.nero.default import (
+                ArmMsgMotionCtrl,
+            )
+
+            self.log_arm_debug("Clear Emergency Stop before recovery")
+            hold_target = [float(value) for value in robot.get_joint_angles()]
+            arm = robot._arm
+            arm._send_msg(ArmMsgMotionCtrl(grag_teach_ctrl=0x02))
+            time.sleep(0.2)
+            arm.set_follower_mode()
+            arm.move_js(hold_target)
+            time.sleep(0.2)
+            arm.reset()
+            self.log_message("COMMAND Clear Emergency Stop controller reset sent")
+            time.sleep(1.0)
+            robot.configure()
+            robot._enable_can_feedback()
+            arm.set_motion_mode(arm.OPTIONS.MOTION_MODE.J)
+            deadline = time.monotonic() + 6.0
+            while time.monotonic() < deadline:
+                arm.move_js(hold_target)
+                arm.enable()
+                status = robot.get_arm_status()
+                message = getattr(status, "msg", status)
+                arm_status = str(getattr(message, "arm_status", ""))
+                ctrl_mode = str(getattr(message, "ctrl_mode", ""))
+                enabled = arm.get_joints_enable_status_list()
+                status_ready = any(
+                    state in arm_status
+                    for state in ("NORMAL", "NO_SOLUTION", "SINGULARITY")
+                )
+                if "CAN_CTRL" in ctrl_mode and status_ready and all(enabled):
+                    arm.set_speed_percent(100)
+                    self.log_arm_debug("Clear Emergency Stop recovered")
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(
+                    "controller remains latched after software reset; engage the physical "
+                    "emergency stop, power-cycle the arm controller, then reconnect"
+                )
+        except Exception as exc:
+            error = exc
+        self.after(0, self._finish_clear_emergency_stop, error)
+
+    def _finish_clear_emergency_stop(self, error: Exception | None) -> None:
+        self.arm_motion_in_progress = False
+        if error is not None:
+            self.set_arm_status_display(
+                f"Clear Emergency Stop failed: {error}",
+                emergency=True,
+            )
+            self.log_message(f"Clear Emergency Stop failed: {error}")
+            return
+        self.set_joint_slider_values(self.robot.get_joint_angles())
+        self.set_arm_status_display(
+            "Arm status: emergency stop cleared | enabled",
+            color="#008000",
+        )
+        self.log_message("Emergency stop cleared; arm is enabled and holding position")
 
     def slider_motion(self, joint: int) -> None:
         if self.suppress_slider_motion:
@@ -1560,26 +1698,62 @@ class NeroLab(tk.Tk):
         robot = self.require_robot()
         if robot is None:
             return
+        if self.joint_motion_block_reason(robot) is not None:
+            self.log_message("Upright Reset: restoring enabled CAN control first")
+            self.reenable_arm()
+            robot = self.require_robot()
+            if robot is None or self.joint_motion_block_reason(robot) is not None:
+                return
         self.cancel_slider_motion()
         self.safe_bicep_position_reached = False
+        self.arm_motion_in_progress = True
+        self.arm_motion_cancel_requested = False
+        self.set_arm_status_display("Arm status: moving to Upright Reset")
+        threading.Thread(
+            target=self._run_upright_reset,
+            args=(robot,),
+            name="nero-upright-reset",
+            daemon=True,
+        ).start()
+
+    def _run_upright_reset(self, robot: Nero) -> None:
+        error: Exception | None = None
         try:
             self.log_arm_debug(f"Upright Reset before recovery target={UPRIGHT_RESET_JOINTS}")
-            speed_result = robot._arm.set_speed_percent(RESET_SPEED_PERCENT)
+            speed_result = robot._arm.set_speed_percent(UPRIGHT_RESET_SPEED_PERCENT)
             self.log_message(f"COMMAND Upright Reset speed={speed_result!r}")
             self.prepare_reset_motion(robot, "Upright Reset")
-            self.move_joint_path(robot, UPRIGHT_RESET_JOINTS, "Upright Reset")
+            self.move_joint_path(
+                robot,
+                UPRIGHT_RESET_JOINTS,
+                "Upright Reset",
+                duration=UPRIGHT_RESET_DURATION_S,
+            )
             self.log_arm_debug("Upright Reset target reached")
             robot._get_gripper_effector().move_gripper_m(value=0.1, force=30.0)
             robot._arm.set_speed_percent(100)
         except Exception as exc:
+            error = exc
             try:
                 robot._arm.set_speed_percent(100)
             except Exception:
                 pass
-            self.log_message(f"Upright Reset failed: {exc}")
+        self.after(0, self._finish_upright_reset, error)
+
+    def _finish_upright_reset(self, error: Exception | None) -> None:
+        self.arm_motion_in_progress = False
+        cancelled = self.arm_motion_cancel_requested
+        self.arm_motion_cancel_requested = False
+        if cancelled:
+            self.log_message("Upright Reset stopped by Emergency Brake")
+            return
+        if error is not None:
+            self.set_arm_status_display(f"Upright Reset failed: {error}", emergency=True)
+            self.log_message(f"Upright Reset failed: {error}")
             return
         self.set_joint_slider_values(UPRIGHT_RESET_JOINTS)
         self.gripper_var.set(0.1)
+        self.set_arm_status_display("Arm status: Upright Reset reached", color="#008000")
         self.log_message(f"Upright Reset reached: joints {UPRIGHT_RESET_JOINTS}; gripper 0.1 m")
 
     def wait_for_joint_target(
@@ -1589,14 +1763,36 @@ class NeroLab(tk.Tk):
         label: str,
         timeout: float = 8.0,
         tolerance: float = 0.002,
+        motion_command: Callable[[list[float]], object] | None = None,
     ) -> None:
         start = time.monotonic()
         deadline = time.monotonic() + timeout
         early_snapshot_logged = False
+        completion_stream_logged = False
         while time.monotonic() < deadline:
-            current = robot.get_joint_angles()
+            if getattr(self, "arm_motion_cancel_requested", False):
+                raise RuntimeError(f"{label} cancelled by Emergency Brake")
+            current = [float(value) for value in robot.get_joint_angles()]
             if all(abs(float(value) - goal) <= tolerance for value, goal in zip(current, target)):
                 return
+            if motion_command is not None:
+                if not completion_stream_logged:
+                    self.log_message(
+                        f"COMMAND {label} continuing encoder-following stream until target"
+                    )
+                    completion_stream_logged = True
+                following_waypoint = [
+                    min(
+                        max(goal, value - RESET_MAX_WAYPOINT_AHEAD_RAD),
+                        value + RESET_MAX_WAYPOINT_AHEAD_RAD,
+                    )
+                    for value, goal in zip(current, target)
+                ]
+                waypoint = [
+                    min(max(value, lower + RESET_LIMIT_MARGIN), upper - RESET_LIMIT_MARGIN)
+                    for value, (lower, upper) in zip(following_waypoint, COMMAND_JOINT_LIMITS)
+                ]
+                motion_command(waypoint)
             if not early_snapshot_logged and time.monotonic() - start >= 0.25:
                 self.log_arm_debug(f"{label} 250ms after move_j")
                 early_snapshot_logged = True
@@ -1610,6 +1806,12 @@ class NeroLab(tk.Tk):
         robot = self.require_robot()
         if robot is None:
             return
+        if self.joint_motion_block_reason(robot) is not None:
+            self.log_message("Safe Bicep Reset: restoring enabled CAN control first")
+            self.reenable_arm()
+            robot = self.require_robot()
+            if robot is None or self.joint_motion_block_reason(robot) is not None:
+                return
         self.cancel_slider_motion()
         try:
             self.log_arm_debug(f"Safe Bicep before recovery target={SAFE_BICEP_RESET_JOINTS}")
@@ -1640,8 +1842,11 @@ class NeroLab(tk.Tk):
             self.log_message("No inference process is running")
 
     def log_message(self, message: str) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, self.log_message, message)
+            return
         entry = message.rstrip() + "\n"
-        self.activity_trace.append(entry)
+        self.activity_trace.append(timestamp_activity_entry(message))
         self.log.configure(state="normal")
         self.log.insert("end", entry)
         self.log.see("end")
@@ -1968,7 +2173,25 @@ class NeroLab(tk.Tk):
         if environment:
             process_environment.update(environment)
         self.process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=process_environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.active_process_label = label
         threading.Thread(target=self._read_process, args=(self.process, label), daemon=True).start()
+
+    def _handle_spacebar(self, _event: object = None) -> str | None:
+        stop_signal = self.teach_stop_signal
+        if (
+            self.active_process_label != "Teach task"
+            or self.process is None
+            or self.process.poll() is not None
+            or stop_signal is None
+        ):
+            return None
+        try:
+            stop_signal.touch()
+        except OSError as exc:
+            self.log_message(f"Could not stop Teach task from GUI: {exc}")
+            return "break"
+        self.log_message("GUI Spacebar requested Teach task save and Safe Bicep return.")
+        return "break"
 
     def _read_process(self, process: subprocess.Popen[str], label: str) -> None:
         assert process.stdout is not None
@@ -1977,6 +2200,11 @@ class NeroLab(tk.Tk):
             if label == "Teach task" and line.startswith("Saved taught task:"):
                 self.after(0, self.refresh_tasks)
         code = process.wait()
+        if label == "Teach task" and self.teach_stop_signal is not None:
+            self.teach_stop_signal.unlink(missing_ok=True)
+            self.teach_stop_signal = None
+        if self.process is process:
+            self.active_process_label = None
         self.after(0, self.log_message, f"{label} exited with code {code}")
         sync_target = self.azure_sync_targets.pop(label, None)
         if code == 0 and sync_target is not None:
@@ -2024,11 +2252,20 @@ class NeroLab(tk.Tk):
                 raise RuntimeError("could not reconnect to the arm")
             current = [float(value) for value in self.robot.get_joint_angles()]
             if not is_powered_safe_bicep_pose(current):
-                self.reenable_arm()
-                if self.robot is None or not self.robot.is_connected:
-                    raise RuntimeError("arm connection was lost during re-enable")
-                self.safe_bicep_reset()
-                current = [float(value) for value in self.robot.get_joint_angles()]
+                recovery_attempts = 3 if workflow in {"Teach", "LeRobot replay"} else 1
+                for attempt in range(1, recovery_attempts + 1):
+                    self.reenable_arm()
+                    if self.robot is None or not self.robot.is_connected:
+                        raise RuntimeError("arm connection was lost during re-enable")
+                    self.safe_bicep_reset()
+                    current = [float(value) for value in self.robot.get_joint_angles()]
+                    if is_powered_safe_bicep_pose(current):
+                        break
+                    if attempt < recovery_attempts:
+                        self.log_message(
+                            f"{workflow} Safe Bicep attempt {attempt}/{recovery_attempts} "
+                            f"made partial progress; retrying from measured joints."
+                        )
             if not is_powered_safe_bicep_pose(current):
                 raise RuntimeError(
                     f"Safe Bicep target was not reached; current joints={current}"
@@ -2139,6 +2376,8 @@ class NeroLab(tk.Tk):
             filename += f"__{self._task_slug(variation)}"
         output = next_task_output_path(TASK_BASE, filename)
         self.taught_task_file = output
+        self.teach_stop_signal = output.with_suffix(".teach-stop")
+        self.teach_stop_signal.unlink(missing_ok=True)
         self.azure_sync_targets["Teach task"] = (output, "tasks")
         self.start_process([
             sys.executable,
@@ -2151,6 +2390,8 @@ class NeroLab(tk.Tk):
             str(output),
             "--follower-anchor",
             *[format_cli_float(value) for value in follower_anchor],
+            "--stop-signal",
+            str(self.teach_stop_signal),
         ], "Teach task")
 
     def replay_trained_task(self) -> None:

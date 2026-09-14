@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ from nero_lab import (
     read_dataset_info,
     requires_enabled_safe_bicep_completion,
     task_layout_image_path,
+    timestamp_activity_entry,
 )
 from dataset_episode_labels import save_dataset_display_name
 from task_trajectory import SAFE_BICEP_BRAKED_JOINTS, SAFE_BICEP_JOINTS
@@ -79,6 +81,52 @@ def test_connect_is_deferred_while_task_process_owns_can():
 
     app.log_message.assert_called_once_with(
         "Arm connection deferred while the active task process owns CAN."
+    )
+
+
+def test_activity_trace_timestamp_is_hidden_from_visible_log():
+    app = SimpleNamespace(
+        activity_trace=[],
+        log=MagicMock(),
+        status_var=MagicMock(),
+    )
+
+    with patch(
+        "nero_lab.timestamp_activity_entry",
+        return_value="[2026-09-11T10:15:30.123-04:00] Arm connected\n",
+    ):
+        NeroLab.log_message(app, "Arm connected")
+
+    assert app.activity_trace == [
+        "[2026-09-11T10:15:30.123-04:00] Arm connected\n"
+    ]
+    app.log.insert.assert_called_once_with("end", "Arm connected\n")
+
+
+def test_timestamp_activity_entry_timestamps_each_line():
+    timestamp = datetime(2026, 9, 11, 14, 15, 30, 123000, tzinfo=timezone.utc)
+
+    assert timestamp_activity_entry("first\nsecond", timestamp) == (
+        "[2026-09-11T14:15:30.123+00:00] first\n"
+        "[2026-09-11T14:15:30.123+00:00] second\n"
+    )
+
+
+def test_gui_spacebar_requests_active_teach_task_stop(tmp_path):
+    stop_signal = tmp_path / "teach.stop"
+    app = SimpleNamespace(
+        active_process_label="Teach task",
+        process=SimpleNamespace(poll=lambda: None),
+        teach_stop_signal=stop_signal,
+        log_message=MagicMock(),
+    )
+
+    result = NeroLab._handle_spacebar(app)
+
+    assert result == "break"
+    assert stop_signal.exists()
+    app.log_message.assert_called_once_with(
+        "GUI Spacebar requested Teach task save and Safe Bicep return."
     )
 
 
@@ -230,6 +278,269 @@ def test_teach_completion_recovers_unsafe_pose_and_stays_enabled():
     )
 
 
+def test_teach_completion_retries_partial_safe_bicep_return():
+    partial = [0.0, -0.9, 0.023, 2.08, -0.026, 0.076, 1.5]
+    robot = SimpleNamespace(
+        is_connected=True,
+        get_joint_angles=MagicMock(
+            side_effect=[[0.6, 0.2, 0.8, 1.3, -0.3, -0.06, 1.44], partial, SAFE_BICEP_JOINTS]
+        ),
+    )
+    app = SimpleNamespace(
+        robot=robot,
+        safe_bicep_position_reached=False,
+        log_message=MagicMock(),
+        connect_robot=MagicMock(),
+        reenable_arm=MagicMock(),
+        safe_bicep_reset=MagicMock(),
+        set_arm_status_display=MagicMock(),
+        set_joint_slider_values=MagicMock(),
+    )
+
+    NeroLab._restore_safe_bicep_after_teach(app)
+
+    assert app.reenable_arm.call_count == 2
+    assert app.safe_bicep_reset.call_count == 2
+    assert app.safe_bicep_position_reached
+    assert any(
+        "partial progress" in call.args[0]
+        for call in app.log_message.call_args_list
+    )
+
+
+def test_lerobot_replay_completion_retries_partial_safe_bicep_return():
+    replay_pose = [0.99, 0.32, 0.31, 1.06, -0.04, -0.33, 1.56]
+    partial = [0.98, 0.30, 0.29, 1.08, -0.04, -0.32, 1.56]
+    robot = SimpleNamespace(
+        is_connected=True,
+        get_joint_angles=MagicMock(
+            side_effect=[replay_pose, partial, SAFE_BICEP_JOINTS]
+        ),
+    )
+    app = SimpleNamespace(
+        robot=robot,
+        safe_bicep_position_reached=False,
+        log_message=MagicMock(),
+        connect_robot=MagicMock(),
+        reenable_arm=MagicMock(),
+        safe_bicep_reset=MagicMock(),
+        set_arm_status_display=MagicMock(),
+        set_joint_slider_values=MagicMock(),
+    )
+
+    NeroLab._restore_safe_bicep_after_lerobot_replay(app)
+
+    assert app.reenable_arm.call_count == 2
+    assert app.safe_bicep_reset.call_count == 2
+    assert app.safe_bicep_position_reached
+    assert any(
+        "LeRobot replay Safe Bicep attempt 1/3 made partial progress"
+        in call.args[0]
+        for call in app.log_message.call_args_list
+    )
+
+
+def test_reset_path_uses_four_second_profile():
+    target = [0.0, 0.0, 0.0, 2.08, 0.0, 0.0, 0.0]
+    arm = SimpleNamespace(
+        move_js=MagicMock(),
+    )
+    robot = SimpleNamespace(
+        _arm=arm,
+        get_joint_angles=MagicMock(return_value=[0.0] * 7),
+    )
+    app = SimpleNamespace(
+        log_message=MagicMock(),
+        wait_for_joint_target=MagicMock(),
+    )
+
+    with patch("nero_lab.time.sleep"):
+        NeroLab.move_joint_path(app, robot, target, "Test reset")
+
+    waypoints = [call.args[0] for call in arm.move_js.call_args_list]
+    largest_step = max(
+        abs(current[3] - previous[3])
+        for previous, current in zip(waypoints, waypoints[1:])
+    )
+    assert largest_step <= 0.016
+    assert len(waypoints) == 201
+    assert "duration=4.00s" in app.log_message.call_args_list[0].args[0]
+    app.wait_for_joint_target.assert_called_once_with(
+        robot,
+        target,
+        "Test reset",
+        timeout=12.0,
+        motion_command=arm.move_js,
+    )
+
+
+def test_reset_path_duration_can_be_overridden():
+    target = [0.0, 0.0, 0.0, 2.08, 0.0, 0.0, 0.0]
+    arm = SimpleNamespace(move_js=MagicMock())
+    robot = SimpleNamespace(
+        _arm=arm,
+        get_joint_angles=MagicMock(return_value=[0.0] * 7),
+    )
+    app = SimpleNamespace(
+        arm_motion_cancel_requested=False,
+        log_message=MagicMock(),
+        wait_for_joint_target=MagicMock(),
+    )
+
+    with patch("nero_lab.time.sleep"):
+        NeroLab.move_joint_path(
+            app,
+            robot,
+            target,
+            "Upright Reset",
+            duration=2.0,
+        )
+
+    assert arm.move_js.call_count == 101
+    assert "duration=2.00s" in app.log_message.call_args_list[0].args[0]
+
+
+def test_reset_path_limits_waypoints_to_live_encoder_progress():
+    arm = SimpleNamespace(move_js=MagicMock())
+    robot = SimpleNamespace(
+        _arm=arm,
+        get_joint_angles=MagicMock(return_value=[0.0] * 7),
+    )
+    app = SimpleNamespace(
+        arm_motion_cancel_requested=False,
+        log_message=MagicMock(),
+        wait_for_joint_target=MagicMock(),
+    )
+
+    with patch("nero_lab.time.sleep"):
+        NeroLab.move_joint_path(
+            app,
+            robot,
+            [1.0] * 7,
+            "Feedback-following reset",
+            duration=0.02,
+        )
+
+    assert arm.move_js.call_args.args[0] == [0.05] * 7
+
+
+def test_reset_completion_continues_encoder_following_stream():
+    current = [0.0] * 7
+
+    class Arm:
+        def __init__(self):
+            self.targets = []
+
+        def move_js(self, target):
+            self.targets.append(target)
+            current[:] = target
+
+    arm = Arm()
+    robot = SimpleNamespace(
+        _arm=arm,
+        get_joint_angles=lambda: current.copy(),
+    )
+    app = SimpleNamespace(
+        arm_motion_cancel_requested=False,
+        log_message=MagicMock(),
+        log_arm_debug=MagicMock(),
+    )
+
+    with patch("nero_lab.time.sleep"):
+        NeroLab.wait_for_joint_target(
+            app,
+            robot,
+            [0.1] * 7,
+            "Completing reset",
+            timeout=0.1,
+            motion_command=arm.move_js,
+        )
+
+    assert arm.targets == [[0.05] * 7, [0.1] * 7]
+
+
+def test_upright_reset_runs_arm_motion_off_tk_thread():
+    robot = SimpleNamespace()
+    worker = MagicMock()
+    app = SimpleNamespace(
+        arm_motion_in_progress=False,
+        arm_motion_cancel_requested=True,
+        safe_bicep_position_reached=True,
+        require_robot=MagicMock(return_value=robot),
+        joint_motion_block_reason=MagicMock(return_value=None),
+        cancel_slider_motion=MagicMock(),
+        set_arm_status_display=MagicMock(),
+        _run_upright_reset=MagicMock(),
+    )
+
+    with patch("nero_lab.threading.Thread", return_value=worker) as thread:
+        NeroLab.upright_reset(app)
+
+    assert app.arm_motion_in_progress
+    assert not app.arm_motion_cancel_requested
+    app._run_upright_reset.assert_not_called()
+    thread.assert_called_once_with(
+        target=app._run_upright_reset,
+        args=(robot,),
+        name="nero-upright-reset",
+        daemon=True,
+    )
+    worker.start.assert_called_once_with()
+
+
+def test_upright_reset_worker_uses_full_controller_speed():
+    arm = SimpleNamespace(set_speed_percent=MagicMock(return_value=None))
+    gripper = SimpleNamespace(move_gripper_m=MagicMock())
+    robot = SimpleNamespace(
+        _arm=arm,
+        _get_gripper_effector=MagicMock(return_value=gripper),
+    )
+    app = SimpleNamespace(
+        log_arm_debug=MagicMock(),
+        log_message=MagicMock(),
+        prepare_reset_motion=MagicMock(),
+        move_joint_path=MagicMock(),
+        after=MagicMock(),
+        _finish_upright_reset=MagicMock(),
+    )
+
+    NeroLab._run_upright_reset(app, robot)
+
+    assert arm.set_speed_percent.call_args_list[0].args == (100,)
+    app.move_joint_path.assert_called_once_with(
+        robot,
+        [0.0] * 7,
+        "Upright Reset",
+        duration=2.0,
+    )
+
+
+def test_safe_bicep_reset_uses_full_controller_speed():
+    arm = SimpleNamespace(set_speed_percent=MagicMock(return_value=None))
+    gripper = SimpleNamespace(move_gripper_m=MagicMock())
+    robot = SimpleNamespace(
+        _arm=arm,
+        _get_gripper_effector=MagicMock(return_value=gripper),
+    )
+    app = SimpleNamespace(
+        require_robot=MagicMock(return_value=robot),
+        joint_motion_block_reason=MagicMock(return_value=None),
+        cancel_slider_motion=MagicMock(),
+        log_arm_debug=MagicMock(),
+        log_message=MagicMock(),
+        prepare_reset_motion=MagicMock(),
+        move_joint_path=MagicMock(),
+        set_joint_slider_values=MagicMock(),
+        safe_bicep_position_reached=False,
+        gripper_var=SimpleNamespace(set=MagicMock()),
+    )
+
+    NeroLab.safe_bicep_reset(app)
+
+    assert arm.set_speed_percent.call_args_list[0].args == (100,)
+    app.move_joint_path.assert_called_once()
+
+
 def test_reenable_latches_fresh_measured_joints_before_enable():
     measured = [0.01, -1.76, 0.02, 2.19, -0.03, 0.08, 1.68]
     status = SimpleNamespace(
@@ -257,6 +568,48 @@ def test_reenable_latches_fresh_measured_joints_before_enable():
     NeroLab.reenable_arm(app)
 
     robot.set_teach_mode.assert_called_once_with(False, hold_target=measured)
+
+
+def test_clear_emergency_stop_holds_pose_resets_and_enables():
+    measured = [0.01, -1.7, 0.02, 2.1, -0.03, 0.08, 1.5]
+    status = SimpleNamespace(
+        msg=SimpleNamespace(arm_status="NORMAL", ctrl_mode="CAN_CTRL")
+    )
+    arm = SimpleNamespace(
+        _send_msg=MagicMock(),
+        set_follower_mode=MagicMock(),
+        move_js=MagicMock(),
+        reset=MagicMock(),
+        set_motion_mode=MagicMock(),
+        enable=MagicMock(return_value=True),
+        get_joints_enable_status_list=MagicMock(return_value=[True] * 7),
+        set_speed_percent=MagicMock(),
+        OPTIONS=SimpleNamespace(MOTION_MODE=SimpleNamespace(J="joint")),
+    )
+    robot = SimpleNamespace(
+        _arm=arm,
+        get_joint_angles=MagicMock(return_value=measured),
+        configure=MagicMock(),
+        _enable_can_feedback=MagicMock(),
+        get_arm_status=MagicMock(return_value=status),
+    )
+    app = SimpleNamespace(
+        log_arm_debug=MagicMock(),
+        log_message=MagicMock(),
+        after=MagicMock(),
+        _finish_clear_emergency_stop=MagicMock(),
+    )
+
+    with patch("nero_lab.time.sleep"):
+        NeroLab._run_clear_emergency_stop(app, robot)
+
+    arm.set_follower_mode.assert_called_once_with()
+    arm.reset.assert_called_once_with()
+    arm.move_js.assert_any_call(measured)
+    arm.enable.assert_called()
+    robot.configure.assert_called_once_with()
+    robot._enable_can_feedback.assert_called_once_with()
+    app.after.assert_called_once_with(0, app._finish_clear_emergency_stop, None)
 
 
 def test_task_handoff_resets_brake_settled_safe_bicep_to_powered_target():

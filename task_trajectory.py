@@ -22,6 +22,7 @@ COMMAND_JOINT_LIMITS = [
 ]
 STREAM_INTERVAL_S = 0.01
 STREAM_SPEED_RAD_S = 0.4
+SMOOTH_MOVE_SPEED_RAD_S = 0.12
 GRIPPER_OPEN_WIDTH_M = 0.1
 GRIPPER_REPLAY_FORCE = 3.0
 GRIPPER_GRASP_FORCE = 3.0
@@ -152,6 +153,23 @@ def stream_recorded_trajectory(
             timeline_pause = sample_callback(samples[sample_index], sample_index)
             if timeline_pause:
                 started += timeline_pause
+
+
+def command_joint_target_if_changed(
+    arm: Any,
+    target: list[float],
+    previous: list[float] | None,
+    tolerance: float = JOINT_TARGET_CHANGE_TOLERANCE_RAD,
+    motion_command: Callable[[list[float]], object] | None = None,
+) -> list[float]:
+    current = [float(value) for value in target]
+    if previous is not None and all(
+        abs(value - prior) <= tolerance
+        for value, prior in zip(current, previous)
+    ):
+        return previous
+    (motion_command or arm.move_js)(current)
+    return current
 
 
 def amplify_gripper_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -515,10 +533,17 @@ def resample_replay_samples(
     return resampled
 
 
-def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:
+def smooth_move_to_target(
+    robot: Any,
+    target: list[float],
+    label: str,
+    motion_speed_rad_s: float = SMOOTH_MOVE_SPEED_RAD_S,
+) -> None:
+    if motion_speed_rad_s <= 0.0:
+        raise ValueError("Smooth motion speed must be positive")
     start = [float(value) for value in robot.get_joint_angles()]
     largest_delta = max(abs(goal - value) for value, goal in zip(start, target))
-    duration = max(0.75, largest_delta / STREAM_SPEED_RAD_S)
+    duration = max(0.75, largest_delta / motion_speed_rad_s)
     step_count = max(1, int(duration / STREAM_INTERVAL_S) + 1)
     move_js = getattr(robot._arm, "move_js", None)
     if move_js is None:
@@ -550,7 +575,11 @@ def smooth_move_to_target(robot: Any, target: list[float], label: str) -> None:
     )
 
 
-def prepare_safe_bicep_motion(robot: Any, label: str) -> None:
+def prepare_safe_bicep_motion(
+    robot: Any,
+    label: str,
+    force_p_recovery: bool = False,
+) -> None:
     current = [float(value) for value in robot.get_joint_angles()]
     status = robot.get_arm_status()
     message = getattr(status, "msg", status)
@@ -559,8 +588,11 @@ def prepare_safe_bicep_motion(robot: Any, label: str) -> None:
         value < lower or value > upper
         for value, (lower, upper) in zip(current, COMMAND_JOINT_LIMITS)
     )
-    if outside_limits or "NO_SOLUTION" in arm_status or "SINGULARITY" in arm_status:
-        reason = "current joints outside command limits" if outside_limits else arm_status
+    if force_p_recovery or outside_limits or "NO_SOLUTION" in arm_status or "SINGULARITY" in arm_status:
+        if force_p_recovery:
+            reason = "direct planned joint move did not complete"
+        else:
+            reason = "current joints outside command limits" if outside_limits else arm_status
         print(f"{label}: running P-to-J recovery because {reason}.", flush=True)
         robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.P)
         time.sleep(0.2)
@@ -605,9 +637,64 @@ def prepare_safe_bicep_motion(robot: Any, label: str) -> None:
     time.sleep(0.2)
 
 
-def smooth_move_with_recovery(robot: Any, target: list[float], label: str) -> None:
+def planned_move_j_to_target(
+    robot: Any,
+    target: list[float],
+    label: str,
+    timeout: float = 8.0,
+) -> None:
+    start = [float(value) for value in robot.get_joint_angles()]
+    robot._arm.set_motion_mode(robot._arm.OPTIONS.MOTION_MODE.J)
+    robot._arm.move_j(target.copy())
+    print(f"{label}: sent full-speed planned move_j to Safe Bicep.", flush=True)
+    started = time.monotonic()
+    deadline = started + timeout
+    moved = False
+    while time.monotonic() < deadline:
+        current = [float(value) for value in robot.get_joint_angles()]
+        if all(abs(value - goal) <= TARGET_TOLERANCE for value, goal in zip(current, target)):
+            return
+        moved = moved or any(
+            abs(value - initial) > 0.002
+            for value, initial in zip(current, start)
+        )
+        if not moved and time.monotonic() - started >= 1.5:
+            break
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"{label} planned move_j did not reach target; "
+        f"current joints={robot.get_joint_angles()}"
+    )
+
+
+def planned_safe_bicep_with_recovery(robot: Any, label: str) -> None:
+    try:
+        planned_move_j_to_target(robot, SAFE_BICEP_JOINTS, label)
+    except RuntimeError as direct_error:
+        print(
+            f"{label}: direct move_j failed; forcing P-to-J recovery: {direct_error}",
+            flush=True,
+        )
+        prepare_safe_bicep_motion(robot, label, force_p_recovery=True)
+        planned_move_j_to_target(robot, SAFE_BICEP_JOINTS, label)
+
+
+def smooth_move_with_recovery(
+    robot: Any,
+    target: list[float],
+    label: str,
+    motion_speed_rad_s: float = SMOOTH_MOVE_SPEED_RAD_S,
+) -> None:
     prepare_safe_bicep_motion(robot, label)
-    smooth_move_to_target(robot, target, label)
+    if motion_speed_rad_s == SMOOTH_MOVE_SPEED_RAD_S:
+        smooth_move_to_target(robot, target, label)
+    else:
+        smooth_move_to_target(
+            robot,
+            target,
+            label,
+            motion_speed_rad_s=motion_speed_rad_s,
+        )
 
 
 def safe_bicep_shutdown(
@@ -615,6 +702,10 @@ def safe_bicep_shutdown(
     label: str,
     engage_brakes: bool = True,
     brake_on_failure: bool = True,
+    recovery_attempts: int = 1,
+    speed_percent: int = 25,
+    motion_speed_rad_s: float = SMOOTH_MOVE_SPEED_RAD_S,
+    use_planned_move: bool = False,
 ) -> None:
     active_error = sys.exc_info()[1]
     cleanup_error: Exception | None = None
@@ -631,9 +722,39 @@ def safe_bicep_shutdown(
             motion_ready = False
             print(f"{label}: skipping Safe Bicep motion: {error}", flush=True)
         if motion_ready:
-            robot._arm.set_speed_percent(25)
-            smooth_move_with_recovery(robot, SAFE_BICEP_JOINTS, label)
-            print(f"{label}: Safe Bicep reached.", flush=True)
+            robot._arm.set_speed_percent(speed_percent)
+            for attempt in range(1, max(1, recovery_attempts) + 1):
+                try:
+                    if use_planned_move:
+                        planned_safe_bicep_with_recovery(robot, label)
+                    elif motion_speed_rad_s == SMOOTH_MOVE_SPEED_RAD_S:
+                        smooth_move_with_recovery(robot, SAFE_BICEP_JOINTS, label)
+                    else:
+                        smooth_move_with_recovery(
+                            robot,
+                            SAFE_BICEP_JOINTS,
+                            label,
+                            motion_speed_rad_s=motion_speed_rad_s,
+                        )
+                except RuntimeError as error:
+                    if attempt >= max(1, recovery_attempts):
+                        raise
+                    print(
+                        f"{label}: return attempt {attempt}/{recovery_attempts} "
+                        f"did not complete; re-normalizing follower control: {error}",
+                        flush=True,
+                    )
+                    hold_target = [float(value) for value in robot.get_joint_angles()]
+                    robot.set_teach_mode(False, hold_target=hold_target)
+                    robot._arm.set_speed_percent(speed_percent)
+                    time.sleep(0.2)
+                else:
+                    print(
+                        f"{label}: Safe Bicep reached on attempt "
+                        f"{attempt}/{max(1, recovery_attempts)}.",
+                        flush=True,
+                    )
+                    break
     except Exception as error:
         cleanup_error = error
     should_brake = engage_brakes or (
@@ -646,7 +767,8 @@ def safe_bicep_shutdown(
         except Exception as error:
             cleanup_error = cleanup_error or error
     else:
-        print(f"{label}: arm remains enabled at Safe Bicep.", flush=True)
+        if cleanup_error is None:
+            print(f"{label}: arm remains enabled at Safe Bicep.", flush=True)
     try:
         robot.disconnect(disable_arm=False)
     except Exception as error:
