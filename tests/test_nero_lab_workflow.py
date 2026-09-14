@@ -11,11 +11,31 @@ from nero_lab import (
     next_task_output_path,
     read_dataset_info,
     requires_enabled_safe_bicep_completion,
+    sync_tracked_tasks,
     task_layout_image_path,
     timestamp_activity_entry,
 )
 from dataset_episode_labels import save_dataset_display_name
 from task_trajectory import SAFE_BICEP_BRAKED_JOINTS, SAFE_BICEP_JOINTS
+
+
+def test_sync_tracked_tasks_copies_updates_and_preserves_local_files(tmp_path):
+    source = tmp_path / "tracked"
+    destination = tmp_path / "runtime"
+    (source / "setup_images").mkdir(parents=True)
+    destination.mkdir()
+    (source / "task.json").write_text('{"task": "tracked"}')
+    (source / "setup_images" / "layout.jpg").write_bytes(b"image")
+    (destination / "task.json").write_text('{"task": "stale"}')
+    (destination / "local-only.json").write_text('{"task": "local"}')
+
+    copied = sync_tracked_tasks(source, destination)
+
+    assert copied == 2
+    assert (destination / "task.json").read_text() == '{"task": "tracked"}'
+    assert (destination / "setup_images" / "layout.jpg").read_bytes() == b"image"
+    assert (destination / "local-only.json").exists()
+    assert sync_tracked_tasks(source, destination) == 0
 
 
 def test_repeated_task_variations_get_unique_recording_paths(tmp_path):

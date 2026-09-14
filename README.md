@@ -193,6 +193,11 @@ Data is stored below the current user's home directory:
 - Windows: `%USERPROFILE%\Nero\datasets` and `%USERPROFILE%\Nero\tasks`.
 - Linux: `~/Nero/datasets` and `~/Nero/tasks`.
 
+Task trajectories and their `setup_images` can also be committed under the
+repository's `tasks` directory. NERO Lab imports new or updated tracked task
+files into the current user's `Nero/tasks` directory during task refresh while
+preserving local-only recordings.
+
 LeRobot commands such as `lerobot-train` and `lerobot-dataset-viz` are resolved
 from the active virtual environment's `PATH` on both platforms.
 

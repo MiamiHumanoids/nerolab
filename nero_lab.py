@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from lerobot_robot_nero import Nero, NeroConfig
     from lerobot_robot_nero.azure_storage import AzureNeroStorage
 
-APP_BUILD = "2026-09-11-teach-planned-recovery-148"
+APP_BUILD = "2026-09-13-git-task-sync-149"
 APP_DISPLAY_NAME = "Nero Lab"
 DATASET_BASE = Path.home() / "Nero" / "datasets"
 TASK_BASE = Path.home() / "Nero" / "tasks"
@@ -60,6 +60,7 @@ COMMAND_JOINT_LIMITS = [
     (-1.570797, 1.570797),
 ]
 PROJECT_ROOT = Path(__file__).resolve().parent
+TRACKED_TASK_BASE = PROJECT_ROOT / "tasks"
 RECORDER = PROJECT_ROOT / "manual_record_dataset.py"
 REPLAYER = PROJECT_ROOT / "replay_latest_dataset.py"
 TASK_TEACHER = PROJECT_ROOT / "teach_task.py"
@@ -83,6 +84,29 @@ RERUN = resolve_cli("lerobot-dataset-viz")
 LE_ROBOT_REPLAY = LEROBOT_REPLAY_PYAV_WRAPPER
 LE_ROBOT_TRAIN = resolve_cli("lerobot-train")
 LE_ROBOT_EVAL = resolve_cli("lerobot-eval")
+
+
+def sync_tracked_tasks(
+    source: Path = TRACKED_TASK_BASE,
+    destination: Path = TASK_BASE,
+) -> int:
+    copied = 0
+    if not source.exists() or source.resolve() == destination.resolve():
+        return copied
+    for source_path in source.rglob("*"):
+        if not source_path.is_file():
+            continue
+        destination_path = destination / source_path.relative_to(source)
+        if (
+            destination_path.exists()
+            and source_path.stat().st_size == destination_path.stat().st_size
+            and source_path.read_bytes() == destination_path.read_bytes()
+        ):
+            continue
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination_path)
+        copied += 1
+    return copied
 WINDOWS_INSTANCE_MUTEX = "Local\\NeroLabGui"
 WINDOWS_APP_USER_MODEL_ID = "NeroLab.Desktop"
 ROBOT_ARM_ICON = PROJECT_ROOT / "assets" / "nero_robot_arm.ico"
@@ -1985,6 +2009,9 @@ class NeroLab(tk.Tk):
 
     def refresh_tasks(self) -> None:
         self._sync_from_azure("tasks")
+        copied = sync_tracked_tasks()
+        if copied:
+            self.log_message(f"Imported {copied} tracked task file(s).")
         TASK_BASE.mkdir(parents=True, exist_ok=True)
         self.taught_task_files = sorted(
             TASK_BASE.glob("*.json"),
