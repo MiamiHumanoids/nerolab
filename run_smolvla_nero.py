@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a LeRobot SmolVLA checkpoint on NERO with a guarded 8D adapter."""
+"""Run a LeRobot VLA checkpoint on NERO with a guarded 8D adapter."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def decode_policy_action(action, max_gripper_force: float) -> tuple[np.ndarray, 
     values = to_numpy(action).reshape(-1)
     if values.size != POLICY_ACTION_SIZE:
         raise ValueError(
-            f"SmolVLA returned {values.size} values; expected {POLICY_ACTION_SIZE}."
+            f"Policy returned {values.size} values; expected {POLICY_ACTION_SIZE}."
         )
     if not 0.0 <= max_gripper_force <= GRIPPER_FORCE_MAX:
         raise ValueError("Max gripper force must be between 0 and 30 N.")
@@ -64,7 +64,12 @@ def decode_policy_action(action, max_gripper_force: float) -> tuple[np.ndarray, 
     return joints, gripper_width, max_gripper_force
 
 
-def build_policy(checkpoint: Path, dataset_root: Path, device: str):
+def build_policy(
+    checkpoint: Path,
+    dataset_root: Path,
+    device: str,
+    policy_type: str = "smolvla",
+):
     metadata = LeRobotDatasetMetadata(
         repo_id="adrian/nero_manual",
         root=dataset_root,
@@ -78,7 +83,7 @@ def build_policy(checkpoint: Path, dataset_root: Path, device: str):
             "Selected dataset must contain an 8D action: 7 joints and gripper width."
         )
     config = make_policy_config(
-        "smolvla",
+        policy_type,
         pretrained_path=checkpoint,
         device=device,
     )
@@ -91,13 +96,13 @@ def build_policy(checkpoint: Path, dataset_root: Path, device: str):
     return metadata, policy, preprocessor, postprocessor
 
 
-def run(checkpoint: Path, dataset_root: Path, task: str, device: str, confirm: bool, dry_run: bool, fast_motion: bool, max_gripper_force: float) -> None:
+def run(checkpoint: Path, dataset_root: Path, task: str, device: str, confirm: bool, dry_run: bool, fast_motion: bool, max_gripper_force: float, policy_type: str = "smolvla") -> None:
     if not confirm and not dry_run:
         raise SystemExit("Hardware motion is blocked. Re-run with --confirm, or use --dry-run.")
 
     device = auto_device() if device == "auto" else device
     metadata, policy, preprocessor, postprocessor = build_policy(
-        checkpoint, dataset_root, device
+        checkpoint, dataset_root, device, policy_type
     )
     robot = Nero(NeroConfig(
         id="smolvla_nero",
@@ -175,8 +180,9 @@ def run(checkpoint: Path, dataset_root: Path, task: str, device: str, confirm: b
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run SmolVLA on NERO through an 8D joint/gripper adapter.")
-    parser.add_argument("--checkpoint", type=Path, required=True, help="Local SmolVLA checkpoint directory.")
+    parser = argparse.ArgumentParser(description="Run a VLA policy on NERO through an 8D joint/gripper adapter.")
+    parser.add_argument("--checkpoint", type=Path, required=True, help="Local policy checkpoint directory.")
+    parser.add_argument("--policy-type", choices=("smolvla", "groot"), default="smolvla")
     parser.add_argument("--dataset-root", type=Path, required=True, help="Local 8D NERO dataset used for normalization.")
     parser.add_argument("--task", required=True, help="Language instruction, for example: pick up the banana")
     parser.add_argument("--device", default="auto", help="Torch device or auto (cuda/ROCm, xpu, mps, or cpu).")
@@ -187,4 +193,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not 0.0 <= args.max_gripper_force <= GRIPPER_FORCE_MAX:
         parser.error("--max-gripper-force must be between 0 and 30 N")
-    run(args.checkpoint, args.dataset_root, args.task, args.device, args.confirm, args.dry_run, args.fast_motion, args.max_gripper_force)
+    run(args.checkpoint, args.dataset_root, args.task, args.device, args.confirm, args.dry_run, args.fast_motion, args.max_gripper_force, args.policy_type)
